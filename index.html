@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
+  <title>Idle Mountain Miner — Dig Deep, Get Rich!</title>
+  <meta name="description" content="An idle mining tycoon game. Dig deep, gear up your hero, upgrade shafts and become the richest miner!" />
+  <link rel="stylesheet" href="css/base.css" />
+  <link rel="stylesheet" href="css/world.css" />
+  <link rel="stylesheet" href="css/panels.css" />
+  <link rel="stylesheet" href="css/inventory.css" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Nunito:wght@600;700;800;900&display=swap" rel="stylesheet" />
+</head>
+<body>
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <symbol id="pine" viewBox="0 0 40 60"><rect x="18" y="46" width="4" height="14" fill="#5d4037"/><path d="M20 2 28 18H24L33 32H27L36 46H4L13 32H7L16 18H12Z" fill="#2e7d32"/><path d="M20 2 28 18H24L33 32H27L36 46H20Z" fill="#388e3c"/></symbol>
+    <symbol id="oak" viewBox="0 0 44 56"><rect x="19" y="30" width="6" height="26" fill="#6d4c41"/><circle cx="22" cy="20" r="16" fill="#43a047"/><circle cx="12" cy="26" r="10" fill="#388e3c"/><circle cx="33" cy="26" r="10" fill="#4caf50"/><circle cx="18" cy="14" r="5" fill="#66bb6a" opacity=".7"/></symbol>
+    <symbol id="bush" viewBox="0 0 40 20"><circle cx="10" cy="13" r="8" fill="#2e7d32"/><circle cx="21" cy="10" r="10" fill="#388e3c"/><circle cx="31" cy="14" r="7" fill="#43a047"/><circle cx="14" cy="9" r="1.6" fill="#ef5350"/><circle cx="27" cy="8" r="1.6" fill="#ffd54f"/></symbol>
+  </svg>
+  <div id="app">
+    <header class="top-bar" id="top-bar">
+      <div class="hud-left">
+        <div class="currency cash" id="hud-cash">
+          <span class="hud-icon">🪙</span>
+          <div class="currency-info"><span class="currency-amount" id="cash-display">$0</span><span class="currency-rate" id="cash-rate">+$0/min</span></div>
+        </div>
+      </div>
+      <div class="hud-center">
+        <div class="prestige-badge" id="prestige-badge" hidden><span>⭐</span><span>×<span id="prestige-mult">1</span></span></div>
+        <div class="boost-chips" id="boost-chips"></div>
+      </div>
+      <div class="hud-right">
+        <div class="currency token" id="hud-token" title="$MINE — mined by your hero's power share of the whole server">
+          <span class="hud-icon token-icon">M</span>
+          <div class="currency-info"><span class="currency-amount" id="token-display">0.0000</span><span class="currency-rate" id="token-rate">$MINE</span></div>
+        </div>
+        <button type="button" class="settings-btn" id="btn-settings" title="Settings">⚙️</button>
+      </div>
+    </header>
+
+    <main class="game-view" id="game-view">
+      <div class="world-scroll" id="world-scroll">
+        <div class="world" id="world">
+          <section class="surface" id="zone-warehouse">
+            <div class="sun"></div>
+            <div class="cloud cloud-a"></div><div class="cloud cloud-b"></div><div class="cloud cloud-c"></div>
+            <svg class="birds" viewBox="0 0 60 20"><path d="M2 10Q6 4 10 10Q14 4 18 10M32 6Q35 1 38 6Q41 1 44 6" fill="none" stroke="#2d3b4a" stroke-width="1.4" stroke-linecap="round"/></svg>
+            <svg class="mtn mtn-far" viewBox="0 0 400 90" preserveAspectRatio="none"><path d="M0 90V52L45 22 78 44 130 6 182 48 232 24 292 58 342 16 400 50V90Z" fill="#8fb0cf"/><path d="M130 6 112 24 124 20 132 29 142 20 152 25ZM342 16 326 30 336 27 343 34 352 27 358 30ZM45 22 33 33 42 30 47 35 54 30 58 33Z" fill="#f4f8fc"/></svg>
+            <svg class="mtn mtn-near" viewBox="0 0 400 70" preserveAspectRatio="none"><path d="M0 70V40L60 14 110 38 170 10 236 42 300 18 360 40 400 26V70Z" fill="#6f8f7d"/></svg>
+            <div class="hill hill-a"></div><div class="hill hill-b"></div>
+            <svg class="plant" style="left:27%;width:30px;height:46px"><use href="#pine"/></svg>
+            <svg class="plant" style="left:33%;width:38px;height:50px"><use href="#oak"/></svg>
+            <svg class="plant" style="left:41%;width:22px;height:34px"><use href="#pine"/></svg>
+            <svg class="plant" style="left:62%;width:26px;height:40px"><use href="#pine"/></svg>
+            <svg class="plant bush" style="left:48%;width:34px;height:17px"><use href="#bush"/></svg>
+            <svg class="plant bush" style="left:19%;width:30px;height:15px"><use href="#bush"/></svg>
+            <div class="grass"></div><div class="fence"></div>
+            <svg class="headframe" id="headframe" viewBox="0 0 100 130" preserveAspectRatio="none">
+              <path d="M12 130 42 14M88 130 58 14M24 90H76M31 56H69M24 90 76 56M76 90 31 56" stroke="#5d4037" stroke-width="5" fill="none" stroke-linecap="round"/>
+              <rect x="34" y="8" width="32" height="8" rx="2" fill="#4e342e"/>
+              <g class="hf-wheel" id="hf-wheel"><circle cx="50" cy="16" r="11" fill="#90a4ae" stroke="#455a64" stroke-width="2.5"/><path d="M50 6V26M40 16H60M43 9 57 23M57 9 43 23" stroke="#455a64" stroke-width="1.6"/></g>
+              <rect x="6" y="104" width="88" height="26" fill="#6d4c41"/><path d="M2 106 50 90 98 106Z" fill="#8d2f2a"/>
+            </svg>
+            <div class="surface-lane">
+              <div class="rails"></div><i class="lamp-post"></i>
+              <div class="crate elevator-drop" id="elevator-drop" title="Ore delivered by the elevator"><b id="pile-val">$0</b></div>
+              <div class="wh-lane" id="wh-lane"></div>
+              <div class="wh-building" id="wh-building">
+                <i class="wh-chimney"><u></u><u></u></i><i class="wh-roof"></i>
+                <span class="wh-sign">Warehouse</span><i class="wh-win"></i><i class="wh-win w2"></i><i class="wh-door"></i><i class="wh-sacks"></i>
+              </div>
+            </div>
+            <div class="upgrade-panel wh-panel">
+              <span class="lvl-badge">Warehouse Lv <span id="wh-lvl">1</span></span>
+              <button type="button" class="btn-upgrade big" data-upgrade="warehouse"><span>⬆ Upgrade</span><small id="wh-cost-1"></small></button>
+            </div>
+          </section>
+
+          <div class="underground"></div>
+          <section class="elevator-shaft" id="zone-elevator">
+            <div class="shaft-core" id="shaft-core"></div>
+            <div class="elevator-ui">
+              <span class="el-lvl-badge">Lv <span id="el-lvl">1</span></span>
+              <button type="button" class="btn-upgrade big" data-upgrade="elevator"><span>⬆ Upgrade</span><small id="el-cost-1"></small></button>
+            </div>
+          </section>
+          <div class="elevator-cable" id="elevator-cable"></div>
+          <div class="elevator-car" id="elevator-car">
+            <div class="elevator-load" id="elevator-load"></div>
+            <div class="elevator-icon-wrap">🛗</div>
+          </div>
+          <section class="mines" id="zone-mines"><div id="shafts-container"></div></section>
+        </div>
+      </div>
+      <div class="tput" id="tput">
+        <div class="tp-row" id="tp-mine"><i></i><span>Mine</span><em></em></div>
+        <div class="tp-row" id="tp-elev"><i></i><span>Elevator</span><em></em></div>
+        <div class="tp-row" id="tp-wh"><i></i><span>Warehouse</span><em></em></div>
+      </div>
+      <div class="bottleneck-warning" id="bottleneck" hidden><span id="bn-text"></span></div>
+    </main>
+
+    <div class="scroll-arrows" id="scroll-arrows">
+      <button type="button" class="scroll-btn" id="scroll-up" title="Scroll up">▲</button>
+      <button type="button" class="scroll-btn" id="scroll-down" title="Scroll down">▼</button>
+    </div>
+
+    <nav class="bottom-nav">
+      <button type="button" class="nav-btn active" data-panel="mine">⛏️<span>Mine</span></button>
+      <button type="button" class="nav-btn" data-panel="hero">🎒<span>Hero</span></button>
+      <button type="button" class="nav-btn" data-panel="ranks">🏆<span>Ranks</span></button>
+      <button type="button" class="nav-btn" data-panel="world">🌍<span>World</span></button>
+      <button type="button" class="nav-btn" data-panel="shop">🛒<span>Shop</span></button>
+      <button type="button" class="nav-btn" data-panel="research">🔬<span>Research</span></button>
+      <button type="button" class="nav-btn" data-panel="events">🎉<span>Events</span></button>
+    </nav>
+
+    <aside class="side-panel hidden" id="panel-hero"><div id="hero-content"></div></aside>
+    <aside class="side-panel hidden" id="panel-ranks"><div id="ranks-content"></div></aside>
+    <aside class="side-panel hidden" id="panel-world">
+      <div class="panel-header"><h2>🌍 Continents</h2><p class="hint">Each continent will mine different gems.</p></div>
+      <div id="continent-list"></div>
+    </aside>
+    <aside class="side-panel hidden" id="panel-shop">
+      <div class="panel-header"><h2>🛒 Shop</h2><p class="hint">Cash buys boosts and gear. $MINE buys premium goods.</p></div>
+      <div id="shop-list"></div>
+    </aside>
+    <aside class="side-panel hidden" id="panel-research">
+      <div class="panel-header"><h2>🔬 Research Lab</h2><p class="hint">Permanent upgrades, paid with cash.</p></div>
+      <div id="research-tree"></div>
+    </aside>
+    <aside class="side-panel hidden" id="panel-events">
+      <div class="panel-header"><h2>🎉 Events</h2></div>
+      <div id="events-content"></div>
+    </aside>
+
+    <div class="overlay hidden" id="offline-modal"><div class="modal"><div class="modal-glow"></div>
+      <h2>⛏️ Welcome Back!</h2><p>Your miners kept working while you were away.</p>
+      <p class="offline-earn">+<span id="offline-amount">0</span></p>
+      <p class="offline-mine" id="offline-mine" hidden></p>
+      <div class="modal-actions"><button type="button" class="btn-primary" id="btn-claim-offline">Collect</button>
+        <button type="button" class="btn-secondary btn-token-pay" id="btn-double-offline">×2 (5 $MINE)</button></div></div></div>
+    <div class="overlay hidden" id="prestige-modal"><div class="modal"><div class="modal-glow prestige-glow"></div>
+      <h2>🌟 Prestige Mine?</h2><p>Reset levels and cash for this mine. Gain a permanent earnings multiplier.</p>
+      <p>Next multiplier: <strong id="prestige-next">×2</strong></p>
+      <div class="modal-actions"><button type="button" class="btn-primary" id="btn-prestige-confirm">Prestige</button>
+        <button type="button" class="btn-secondary" id="btn-prestige-cancel">Not yet</button></div></div></div>
+    <div class="overlay hidden" id="dyn-modal"><div class="modal" id="dyn-box"></div></div>
+    <div class="toast" id="toast"></div>
+  </div>
+  <script src="js/config.js"></script>
+  <script src="js/util.js"></script>
+  <script src="js/state.js"></script>
+  <script src="js/formulas.js"></script>
+  <script src="js/hero.js"></script>
+  <script src="js/sim.js"></script>
+  <script src="js/render.js"></script>
+  <script src="js/floors.js"></script>
+  <script src="js/upgrades.js"></script>
+    <script src="js/net.js"></script>
+  <script src="js/season.js"></script>
+  <script src="js/inventory.js"></script>
+  <script src="js/ranks.js"></script>
+  <script src="js/panels.js"></script>
+  <script src="js/offline.js"></script>
+  <script src="js/main.js"></script>
+</body>
+</html>

@@ -1,0 +1,8 @@
+{
+  "name": "idle-miner",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Idle Mountain Miner — multiplayer Season 0",
+  "scripts": { "start": "node server/server.js", "test": "node server/test.js" },
+  "engines": { "node": ">=18" }
+}
