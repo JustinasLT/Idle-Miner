@@ -9,11 +9,13 @@
     "setup:token": "node scripts/setup-token.js",
     "calibrate": "node scripts/calibrate.js"
   },
-  "engines": { "node": ">=18" },
+  "engines": {
+    "node": ">=18"
+  },
   "dependencies": {
     "@solana/spl-token": "~0.4.9",
     "@solana/web3.js": "~1.98.0",
-    "bs58": "5.0.0",
+    "bs58": "^5.0.0",
     "pg": "^8.13.0",
     "tweetnacl": "1.0.3"
   },
