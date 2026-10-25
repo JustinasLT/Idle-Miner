@@ -9,6 +9,7 @@
   <link rel="stylesheet" href="css/world.css" />
   <link rel="stylesheet" href="css/panels.css" />
   <link rel="stylesheet" href="css/inventory.css" />
+  <link rel="stylesheet" href="css/account.css" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Nunito:wght@600;700;800;900&display=swap" rel="stylesheet" />
@@ -32,11 +33,11 @@
         <div class="boost-chips" id="boost-chips"></div>
       </div>
       <div class="hud-right">
-        <div class="currency token" id="hud-token" title="$MINE — mined by your hero's power share of the whole server">
+        <div class="currency token" id="hud-token" title="$MINE — your share of the whole server's mining, paid by the server">
           <span class="hud-icon token-icon">M</span>
           <div class="currency-info"><span class="currency-amount" id="token-display">0.0000</span><span class="currency-rate" id="token-rate">$MINE</span></div>
         </div>
-        <button type="button" class="settings-btn" id="btn-settings" title="Settings">⚙️</button>
+        <button type="button" class="settings-btn" id="btn-settings" title="Account">👤</button>
       </div>
     </header>
 
@@ -111,17 +112,17 @@
       <button type="button" class="nav-btn active" data-panel="mine">⛏️<span>Mine</span></button>
       <button type="button" class="nav-btn" data-panel="hero">🎒<span>Hero</span></button>
       <button type="button" class="nav-btn" data-panel="ranks">🏆<span>Ranks</span></button>
-      <button type="button" class="nav-btn" data-panel="world">🌍<span>World</span></button>
+      <button type="button" class="nav-btn" data-panel="packs">📦<span>Packs</span></button>
       <button type="button" class="nav-btn" data-panel="shop">🛒<span>Shop</span></button>
       <button type="button" class="nav-btn" data-panel="research">🔬<span>Research</span></button>
-      <button type="button" class="nav-btn" data-panel="events">🎉<span>Events</span></button>
+      <button type="button" class="nav-btn" data-panel="bank">🏦<span>Bank</span></button>
     </nav>
 
     <aside class="side-panel hidden" id="panel-hero"><div id="hero-content"></div></aside>
     <aside class="side-panel hidden" id="panel-ranks"><div id="ranks-content"></div></aside>
-    <aside class="side-panel hidden" id="panel-world">
-      <div class="panel-header"><h2>🌍 Continents</h2><p class="hint">Each continent will mine different gems.</p></div>
-      <div id="continent-list"></div>
+    <aside class="side-panel hidden" id="panel-packs">
+      <div class="panel-header"><h2>📦 Packs</h2><p class="hint">One-time packs: gear, cash, hero levels and unlimited mining.</p></div>
+      <div id="packs-content"></div>
     </aside>
     <aside class="side-panel hidden" id="panel-shop">
       <div class="panel-header"><h2>🛒 Shop</h2><p class="hint">Cash buys boosts and gear. $MINE buys premium goods.</p></div>
@@ -131,9 +132,9 @@
       <div class="panel-header"><h2>🔬 Research Lab</h2><p class="hint">Permanent upgrades, paid with cash.</p></div>
       <div id="research-tree"></div>
     </aside>
-    <aside class="side-panel hidden" id="panel-events">
-      <div class="panel-header"><h2>🎉 Events</h2></div>
-      <div id="events-content"></div>
+    <aside class="side-panel hidden" id="panel-bank">
+      <div class="panel-header"><h2>🏦 Bank</h2><p class="hint">Move $MINE between your wallet and the game.</p></div>
+      <div id="bank-content"></div>
     </aside>
 
     <div class="overlay hidden" id="offline-modal"><div class="modal"><div class="modal-glow"></div>
@@ -148,8 +149,25 @@
       <div class="modal-actions"><button type="button" class="btn-primary" id="btn-prestige-confirm">Prestige</button>
         <button type="button" class="btn-secondary" id="btn-prestige-cancel">Not yet</button></div></div></div>
     <div class="overlay hidden" id="dyn-modal"><div class="modal" id="dyn-box"></div></div>
+    <div class="login" id="login" hidden>
+      <div class="login-card">
+        <div class="login-logo">⛏️</div>
+        <h1>Idle Mountain Miner</h1>
+        <p class="login-sub">Dig deep. Gear up. Mine <b>$MINE</b>.</p>
+        <p class="login-boot" id="boot-msg"></p>
+        <div id="login-actions" class="login-actions">
+          <div id="login-wallets"></div>
+          <button type="button" class="login-btn guest" id="btn-guest">👤 Play as guest</button>
+          <p class="login-hint">Guests can play everything, but progress lives only in this browser (clearing site data loses it) and $MINE can't be withdrawn. Connect a wallet any time later to keep your progress and unlock packs &amp; withdrawals.</p>
+        </div>
+        <p class="login-status" id="login-status"></p>
+        <p class="login-msg" id="login-msg"></p>
+        <p class="login-net">Solana test network · no real money</p>
+      </div>
+    </div>
     <div class="toast" id="toast"></div>
   </div>
+  <script src="js/shared.js"></script>
   <script src="js/config.js"></script>
   <script src="js/util.js"></script>
   <script src="js/state.js"></script>
@@ -159,11 +177,15 @@
   <script src="js/render.js"></script>
   <script src="js/floors.js"></script>
   <script src="js/upgrades.js"></script>
-    <script src="js/net.js"></script>
+  <script src="js/net.js"></script>
+  <script src="js/wallet.js"></script>
   <script src="js/season.js"></script>
   <script src="js/inventory.js"></script>
   <script src="js/ranks.js"></script>
   <script src="js/panels.js"></script>
+  <script src="js/packs.js"></script>
+  <script src="js/bank.js"></script>
+  <script src="js/login.js"></script>
   <script src="js/offline.js"></script>
   <script src="js/main.js"></script>
 </body>

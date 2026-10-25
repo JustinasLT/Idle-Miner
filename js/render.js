@@ -7,7 +7,8 @@ function renderHUD() {
   setText($("cash-display"), formatMoney(state.cash));
   setText($("cash-rate"), "+" + formatMoney(rateMin) + "/min");
   setText($("token-display"), formatToken(state.token));
-  setText($("token-rate"), !net.online ? "⚠ offline" : seasonOver() ? "$MINE" : "+" + formatToken(miningInfo().perDay) + "/day");
+  const mi = miningInfo();
+  setText($("token-rate"), !net.online ? "⚠ offline" : seasonOver() ? "$MINE" : mi.free ? "🔒 free cap · get a pack" : mi.onboarding ? "🚀 +" + formatToken(mi.perSec * 3600) + "/hr" : "+" + formatToken(mi.perDay) + "/day");
   const mine = activeMine();
   setText($("wh-lvl"), mine.warehouse.level);
   setText($("el-lvl"), mine.elevator.level);

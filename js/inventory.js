@@ -74,6 +74,8 @@ function stakeCard() { // your share of the global power and the $MINE it earns 
   const m = miningInfo(), share = m.share * 100, earned = net.info ? net.info.earned : 0;
   if (!net.info) return `<div class="inv-card stake"><h3>⚡ Mining stake · Season 0</h3><p class="dim">${net.error ? "⚠ Can't reach the game server (" + net.error + "). Mining is paused until it's back." : "Connecting to the server…"}</p></div>`;
   const note = seasonOver() ? "Season 0 has ended — mining is finished."
+    : m.free ? `You have mined the free-tier limit of ${fmtN(net.info.free.cap)} $MINE. Buy any pack (Packs tab) and mining starts again.`
+    : m.onboarding ? `🚀 Fast start: the first ${fmtN(net.info.free.onboardCap)} $MINE are paid at a boosted rate while you play. After that the normal rate below applies.`
     : m.capped ? `Capped at ${pct(PLAYER_DAILY_CAP)} of the daily emission.`
     : m.factor < 1 ? `Only ${m.players} players so far — daily emission is scaled to ${pct(m.factor)} until ${FULL_PLAYERS} play.` : "Full daily emission is active.";
   return `<div class="inv-card stake"><h3>⚡ Mining stake · Season 0</h3>
@@ -81,8 +83,8 @@ function stakeCard() { // your share of the global power and the $MINE it earns 
     <i class="dur"><u style="width:${Math.min(100, Math.max(1, share))}%"></u></i>
     <div class="st-row"><span>Your hero power</span><b>${fmtN(m.my)}</b></div>
     <div class="st-row"><span>Global power (${m.players} active players)</span><b>${fmtN(m.global)}</b></div>
-    <div class="st-row"><span>Predicted $MINE / day</span><b class="tokc">◈ ${formatToken(m.perDay)}</b></div>
-    <div class="st-row"><span>Predicted $MINE / hour</span><b class="tokc">◈ ${formatToken(m.perDay / 24)}</b></div>
+    <div class="st-row"><span>Predicted $MINE / day</span><b class="tokc">◈ ${formatToken(m.free ? 0 : m.onboarding ? m.perSec * 86400 : m.perDay)}</b></div>
+    <div class="st-row"><span>Predicted $MINE / hour</span><b class="tokc">◈ ${formatToken(m.free ? 0 : m.onboarding ? m.perSec * 3600 : m.perDay / 24)}</b></div>
     <div class="st-row"><span>Mined this season</span><b class="tokc">◈ ${formatToken(earned)}</b></div>
     <p class="dim small">${net.online ? "" : "⚠ Server offline — showing last known numbers. "}${note} Stronger gear and a higher level raise your share. Prediction uses today's power; others grow too.</p></div>`;
 }
@@ -111,32 +113,34 @@ function renderHero() {
   const tabs = [["items", "ITEMS"], ["hero", "HERO"], ["craft", "CRAFT"]].map(([t, n]) => `<button type="button" class="inv-tab${INV.tab === t ? " on" : ""}" data-act="tab" data-tab="${t}">${n}</button>`).join("");
   $("hero-content").innerHTML = `<div class="inv"><div class="inv-top"><span class="inv-title">◆ INVENTORY</span><nav>${tabs}</nav></div>${INV.tab === "items" ? itemsTab() : INV.tab === "hero" ? heroTab() : craftTab()}</div>`;
 }
-function heroClick(e) {
+async function heroClick(e) {
   const b = e.target.closest("[data-act]");
   if (!b || b.disabled) return;
   const d = b.dataset, a = d.act, it = d.id ? itemById(+d.id) : null;
-  if (a === "tab") INV.tab = d.tab;
-  else if (a === "slot") INV.selSlot = d.slot;
-  else if (a === "pick") INV.selItem = +d.id;
-  else if (a === "equip") { if (!canEquip(it)) return toast("Hero must be level " + it.il + " to equip this"); state.eq[it.slot] = it.id; INV.selSlot = it.slot; INV.selItem = null; }
-  else if (a === "unequip") delete state.eq[d.slot];
-  else if (a === "lock") it.lock = !it.lock;
-  else if (a === "sell") { if (!it.lock) sellItem(it); INV.selItem = null; }
-  else if (a === "sellall") {
+  // pure UI actions
+  if (a === "tab") { INV.tab = d.tab; return renderHero(); }
+  if (a === "slot") { INV.selSlot = d.slot; return renderHero(); }
+  if (a === "pick") { INV.selItem = +d.id; return renderHero(); }
+  if (a === "page") { INV.page = +d.p; return renderHero(); }
+  // everything else is a request to the server, which validates it and answers with the new state
+  const send = async (body, after) => { const r = await netAct(body); if (!r.ok) toast(r.error); else if (after) after(r); renderHero(); };
+  if (a === "equip") { if (!canEquip(it)) return toast("Hero must be level " + it.il + " to equip this"); return send({ type: "equip", id: it.id }, () => { INV.selSlot = it.slot; INV.selItem = null; }); }
+  if (a === "unequip") return send({ type: "unequip", slot: d.slot });
+  if (a === "lock") return send({ type: "lock", id: it.id });
+  if (a === "sell") { if (it.lock) return; return send({ type: "sell", id: it.id }, () => { INV.selItem = null; }); }
+  if (a === "sellall") {
     const list = spareItems().filter((i) => !i.lock && i.r <= 2);
     if (!list.length) return toast("Nothing to sell — Epic+ and locked items are kept");
-    return confirmModal("Sell all?", `Sell ${list.length} unlocked item(s) up to Rare for ${formatMoney(list.reduce((s, i) => s + sellValue(i), 0))}? Epic and better are kept.`, "Sell", () => { list.forEach(sellItem); computeFx(); renderHero(); saveState(); });
+    return confirmModal("Sell all?", `Sell ${list.length} unlocked item(s) up to Rare for ${formatMoney(list.reduce((s, i) => s + sellValue(i), 0))}? Epic and better are kept.`, "Sell", () => send({ type: "sellAll" }));
   }
-  else if (a === "sort") state.inv.sort((x, y) => y.r - x.r || y.il - x.il || x.id - y.id);
-  else if (a === "auto") autoEquip();
-  else if (a === "repair") repairList([it]);
-  else if (a === "repairall") repairAll();
-  else if (a === "fuse") fuse(d.slot, +d.r);
-  else if (a === "crate") openCrate(d.slot);
-  else if (a === "page") INV.page = +d.p;
-  else if (a === "buypage") {
+  if (a === "sort") return send({ type: "sort" });
+  if (a === "auto") return send({ type: "autoEquip" });
+  if (a === "repair") return send({ type: "repair", id: it.id });
+  if (a === "repairall") return send({ type: "repairAll" });
+  if (a === "fuse") return send({ type: "fuse", slot: d.slot, r: +d.r });
+  if (a === "crate") return send({ type: "crate", slot: d.slot });
+  if (a === "buypage") {
     if (state.invPages >= MAX_PAGES) return;
     return confirmModal("Unlock page " + (state.invPages + 1) + "?", `Spend ${formatToken(pageCost())} $MINE for 48 more backpack slots? You have ${formatToken(state.token)} $MINE.`, "Unlock", buyPage);
   }
-  computeFx(); renderHero(); saveState();
 }

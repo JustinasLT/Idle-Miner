@@ -1,8 +1,7 @@
 "use strict";
   const elCar = $("elevator-car"), elLoad = $("elevator-load"), pileVal = $("pile-val");
   const bnEl = $("bottleneck"), whLane = $("wh-lane"), whBuilding = $("wh-building");
-  let cashLog = [], rateMin = 0, slowT = 0, bottleneck = null;
-  const t0 = performance.now() / 1000;
+  let rateMin = 0, slowT = 0, bottleneck = null;
   let elevatorSim, minerSim = [], workerSim = [];
   const floorUI = [];
   function resetSims() {
@@ -19,11 +18,11 @@
     updateMiners(dt, mine, rm);
     updateElevator(dt, mine, rm);
     updateWorkers(dt, mine, rm);
-    heroTick(dt, mine);
+    mineTick(dt); cashTick();
     slowT += dt;
     if (slowT > 0.25) {
       slowT = 0;
-      rateMin = cashPerMin();
+      rateMin = net.cashRate * 60;
       refreshFloors(mine, rm);
       detectBottleneck(mine, rm);
       updateHeroVisuals(mine, rm);
@@ -32,18 +31,9 @@
     renderHUD();
   }
 
-  function cashPerMin() {
-    const now = performance.now() / 1000;
-    cashLog = cashLog.filter((c) => now - c.t < 30);
-    const span = Math.max(8, Math.min(30, now - t0));
-    return (cashLog.reduce((s, c) => s + c.v, 0) / span) * 60;
-  }
-
   function deliver(v) {
+    // purely cosmetic: the cash itself is paid by the server (net.cashRate)
     v *= 1 + fx.fort;
-    state.cash += v;
-    state.stats.totalEarned += v;
-    cashLog.push({ t: performance.now() / 1000, v });
     const el = document.createElement("div");
     el.className = "cash-particle";
     el.textContent = "+" + formatMoney(v);
@@ -124,7 +114,6 @@
             sh.stock += m.load;
             m.load = 0;
             bump(floorUI[i] && floorUI[i].boxEl);
-            rollDrop(i);
           }
         } else {
           m.t -= dt;
@@ -227,5 +216,4 @@
     const w = rW > (bottleneck === "warehouse" ? 1.5 : 2.5);
     const prev = bottleneck;
     bottleneck = e && (!w || rE >= rW) ? "elevator" : w ? "warehouse" : null;
-    if (prev && !bottleneck) addXp(50); // hero cleared the jam
   }

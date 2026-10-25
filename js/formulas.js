@@ -17,11 +17,7 @@
     return { upgradeCostMult: upgradeCostMult * (1 - fx.disc), elevatorCapMult, offlineMult, sellMult, mineMult };
   }
 
-  // Deeper floors hold more valuable ore: each floor is worth 2.3x the one above
-  const unitValue = (i, mine) => 1.5 * Math.pow(2.3, i) * mine.prestigeMult;
-  // Elevator/warehouse upgrades get pricier as you dig deeper
-  const infraScale = (mine) => Math.pow(1.9, mine.unlockedShaftCount - 1);
-  const minersFor = (lvl) => Math.min(4, 1 + Math.floor(lvl / 5));
+  const { unitValue, infraScale, minersFor, upgradeCost, shaftUnlockCost } = Shared;
 
   // ore units mined per second by one floor (miners just deliver this in trips)
   function floorUnitRate(i, mine, rm) {
@@ -44,15 +40,8 @@
     return r * (1 + fx.haste) * boostMult("sell");
   }
 
-  function upgradeCost(base, level, multLevels, costMult) {
-    let total = 0;
-    for (let i = 0; i < multLevels; i++) {
-      total += Math.floor(base * Math.pow(1.12, level + i) * costMult);
-    }
-    return total;
-  }
 
-const boostOn = (k) => Date.now() < (state.boosts[k] || 0);
+const serverNow = () => Date.now() + (typeof net !== "undefined" ? net.offset : 0);
+const boostOn = (k) => serverNow() < (state.boosts[k] || 0);
 const boostMult = (k) => (boostOn(k) ? BOOST_MULT[k] : 1);
-// $MINE trickles out of every finished miner trip — deeper floors pay a little more
-const tokenPerTrip = (i) => TOKEN_PER_TRIP * (1 + 0.12 * i);
+

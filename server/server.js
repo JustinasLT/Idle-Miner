@@ -1,206 +1,192 @@
 "use strict";
-// Idle Miner multiplayer server — zero dependencies, Node 18+.
-//   node server/server.js            -> game + API on http://localhost:3000
-// Env: PORT, RATE_LIMIT, TRUST_PROXY, DATA_FILE, SEASON_START (ISO date, first run only), DEV_DAY_OFFSET (days, testing)
-const http = require("http"), fs = require("fs"), path = require("path"), crypto = require("crypto");
+// Idle Miner server.   node server/server.js   ->  game + API on http://localhost:3000
+// See README.md for the environment variables.
+const http = require("http"), fs = require("fs"), path = require("path"), crypto = require("crypto"), zlib = require("zlib");
+const { C, SOL, env, num } = require("./config.js");
+const { openStore } = require("./store.js");
+const { createChain } = require("./chain.js");
+const { createGame, ApiError } = require("./game.js");
+const { createBank } = require("./bank.js");
 
-const PORT = +process.env.PORT || 3000;
-const DATA_FILE = process.env.DATA_FILE || path.join(__dirname, "data.json");
 const ROOT = path.join(__dirname, "..");
-const DEV_OFFSET = (+process.env.DEV_DAY_OFFSET || 0) * 864e5;
+const MIME = { ".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8", ".js": "text/javascript; charset=utf-8" };
+// the page may only load its own files + Google Fonts; no inline scripts; API calls only to itself
+const CSP = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'";
+const SEC = { "Content-Security-Policy": CSP, "X-Content-Type-Options": "nosniff", "X-Frame-Options": "DENY", "Referrer-Policy": "no-referrer", "Cross-Origin-Opener-Policy": "same-origin", "Permissions-Policy": "camera=(), microphone=(), geolocation=()" };
 
-// ---- economy (keep in sync with js/config.js) ----------------------------------------
-const C = {
-  TOTAL_POOL: 100e6, LB_POOL: 10e6, MINING_POOL: 5e6, SEASON_DAYS: 30, FULL_PLAYERS: 100,
-  PLAYER_DAILY_CAP: 0.025, LB_SIZE: 100, LB_PRIZE_EXP: 0.85, ACTIVE_DAYS: 3, MAX_PAGES: 5,
-};
-C.SEASON_MS = C.SEASON_DAYS * 864e5;
-C.DAILY = C.MINING_POOL / C.SEASON_DAYS;
-const PAGE_COST = [0, 300, 800, 2000, 5000];
-const PRICES = { boost_sell: 25, boost_elev: 25, tome: 15, offline2: 5 }; // $MINE shop prices (server decides the price)
+async function createApp(opts = {}) {
+  const store = opts.store || await openStore({ file: env.DATA_FILE || path.join(__dirname, "data.json"), databaseUrl: env.DATABASE_URL, ssl: env.DATABASE_SSL === "false" ? false : undefined });
+  const game = createGame({ store, now: opts.now });
+  await game.load();
+  const chain = opts.chain || createChain(SOL);
+  const bank = createBank(game, chain);
+  const { db, bad } = game;
 
-const now = () => Date.now() + DEV_OFFSET;
+  // ---- rate limiting (in memory) ------------------------------------------------------------------------
+  const buckets = new Map();
+  function limit(key, max, windowMs) {
+    const t = Date.now();
+    let b = buckets.get(key);
+    if (!b || t > b.reset) { b = { n: 0, reset: t + windowMs }; buckets.set(key, b); }
+    if (++b.n > max) throw new ApiError(429, "Too many requests — slow down");
+  }
+  const sweep = setInterval(() => { const t = Date.now(); for (const [k, b] of buckets) if (t > b.reset) buckets.delete(k); }, 60000); sweep.unref();
+  const RATE = num(env.RATE_LIMIT, 300);
+  const TRUST_PROXY = env.TRUST_PROXY ? env.TRUST_PROXY !== "0" : !!env.RENDER; // Render sets RENDER=true
+  const clientIp = (req) => (TRUST_PROXY && String(req.headers["x-forwarded-for"] || "").split(",")[0].trim()) || req.socket.remoteAddress || "?";
 
-// ---- persistence -------------------------------------------------------------------
-let db = { season: null, players: {}, lastTick: 0, nextSeq: 1 }, dirty = false;
-try { db = { ...db, ...JSON.parse(fs.readFileSync(DATA_FILE, "utf8")) }; } catch { /* first run */ }
-if (!db.season) { db.season = { start: process.env.SEASON_START ? Date.parse(process.env.SEASON_START) : now() }; db.lastTick = now(); dirty = true; }
-const seasonEnd = () => db.season.start + C.SEASON_MS;
-const over = () => now() >= seasonEnd();
-function save() {
-  if (!dirty) return;
-  dirty = false;
-  const tmp = DATA_FILE + ".tmp";
-  fs.writeFileSync(tmp, JSON.stringify(db)); fs.renameSync(tmp, DATA_FILE);
-}
-setInterval(save, 10000).unref();
-for (const sig of ["SIGINT", "SIGTERM"]) process.on(sig, () => { save(); process.exit(0); });
+  // ---- sign in with a Solana wallet: a one-time message that the wallet signs (no transaction, no cost) ------
+  const nonces = new Map();
+  setInterval(() => { const t = Date.now(); for (const [k, v] of nonces) if (t > v.exp) nonces.delete(k); }, 60000).unref();
+  const nacl = opts.nacl || require("tweetnacl"), bs58 = opts.bs58 || require("bs58");
+  function walletBytes(w) {
+    let b; try { b = bs58.decode(String(w)); } catch { bad("Invalid wallet address"); }
+    if (b.length !== 32 || bs58.encode(b) !== w) bad("Invalid wallet address");
+    return b;
+  }
 
-// ---- helpers -------------------------------------------------------------------------
-const sha = (s) => crypto.createHash("sha256").update(s).digest("hex");
-const clamp = (x, a, b) => Math.max(a, Math.min(b, x));
-const num = (x) => (Number.isFinite(+x) ? +x : 0);
-const isActive = (p, t) => p.power > 0 && t - p.lastSeen < C.ACTIVE_DAYS * 864e5;
-const cleanName = (s) => String(s || "").replace(/[^A-Za-z0-9 _.\-]/g, "").trim().replace(/\s+/g, " ").slice(0, 16);
-function uniqueName(want, selfId) {
-  let n = cleanName(want); if (n.length < 2) n = "Miner";
-  const taken = (x) => Object.values(db.players).some((p) => p.id !== selfId && p.name.toLowerCase() === x.toLowerCase());
-  let out = n, k = 1;
-  while (taken(out)) out = n.slice(0, 12) + (++k > 9 ? Math.floor(Math.random() * 9000 + 1000) : k);
-  return out;
-}
-const pointsOf = (p) => Math.floor(p.power + p.level * 20 + p.items * 5 + p.earned * 0.1);
-let prizeW = null;
-function prizeFor(rank) {
-  if (rank < 1 || rank > C.LB_SIZE) return 0;
-  if (!prizeW) { prizeW = Array.from({ length: C.LB_SIZE }, (_, i) => 1 / Math.pow(i + 1, C.LB_PRIZE_EXP)); prizeW.sum = prizeW.reduce((a, b) => a + b, 0); }
-  return (C.LB_POOL * prizeW[rank - 1]) / prizeW.sum;
-}
+  const sessionReply = (p, token, extra) => ({ token, ...game.view(p), ...extra });
+  const auth = (req) => game.authToken(req.headers.authorization);
 
-// ---- anti-cheat: plausibility limits (the game itself still runs in the browser) -----------
-// Level can only grow as fast as hero XP can be earned (+ bought tomes); power/items are bounded by level & time.
-const xpForLevel = (L) => 60 * (L - 1) + 15 * L * (L - 1);
-function maxLevel(p, t) {
-  const budget = ((t - p.created) / 1000) * 1.0 + 500 * p.tomes + 300;
-  let L = 1; while (L < 100 && xpForLevel(L + 1) <= budget) L++;
-  return L;
-}
-// you start with 3 items and can only equip what you have found: at most (3 + items found) slots of perfect Mythic gear
-const maxPower = (L, items) => 50 * L + Math.min(8, 3 + items) * 934 * (1 + 0.03 * (L - 1));
-const maxItems = (p, t) => 10 + ((t - p.created) / 36e5) * 150;
+  // ---- routes ---------------------------------------------------------------------------------------------------------
+  // each handler: (ctx) => object ; ctx = { req, body, p (player or null), ip, host }
+  const routes = {
+    "GET /api/health": () => ({ ok: true, now: game.now(), store: store.kind }),
+    "GET /api/config": () => ({ ...bank.publicConfig(), nonceTtl: 300 }),
+    "GET /api/leaderboard": ({ p }) => game.leaderboard(p),
 
-// ---- mining emission: every 5s the season's daily pool is split by power share -----------
-function tick() {
-  const t = now(), upto = Math.min(t, seasonEnd());
-  const dt = clamp((upto - db.lastTick) / 1000, 0, 60); // downtime is not paid out
-  if (upto > db.lastTick) db.lastTick = upto;
-  if (dt <= 0) return;
-  const act = Object.values(db.players).filter((p) => isActive(p, upto));
-  if (!act.length) return;
-  const G = act.reduce((s, p) => s + p.power, 0);
-  const pool = (C.DAILY * Math.min(1, act.length / C.FULL_PLAYERS) * dt) / 86400, cap = (C.DAILY * C.PLAYER_DAILY_CAP * dt) / 86400;
-  for (const p of act) { const g = Math.min((pool * p.power) / G, cap); p.balance += g; p.earned += g; }
-  dirty = true;
-}
-setInterval(tick, 5000).unref();
+    "POST /api/guest": ({ ip, body }) => {
+      limit("guest:" + ip, 20, 3600e3); limit("guest:all", 600, 3600e3);
+      const p = game.createPlayer(body.name);
+      return sessionReply(p, game.newSession(p), {});
+    },
+    "POST /api/auth/nonce": ({ ip, body, host }) => {
+      limit("nonce:" + ip, 40, 600e3);
+      walletBytes(body.wallet);
+      const nonce = crypto.randomBytes(16).toString("hex"), t = Date.now();
+      const message = `${host} wants you to sign in with your Solana account:\n${body.wallet}\n\nSign in to Idle Miner. This costs nothing and does not give access to your funds.\n\nNonce: ${nonce}\nIssued At: ${new Date(t).toISOString()}`;
+      nonces.set(nonce, { wallet: body.wallet, message, exp: t + 300e3 });
+      return { nonce, message };
+    },
+    "POST /api/auth/wallet": async ({ ip, req, body, p: caller }) => {
+      limit("wallet:" + ip, 30, 600e3);
+      const entry = nonces.get(String(body.nonce));
+      nonces.delete(String(body.nonce));                     // one use only
+      if (!entry || Date.now() > entry.exp) bad("Sign-in request expired — try again", 401);
+      const pub = walletBytes(body.wallet);
+      if (entry.wallet !== body.wallet) bad("Wallet mismatch", 401);
+      const sig = Buffer.from(String(body.signature || ""), "base64");
+      if (sig.length !== 64 || !nacl.sign.detached.verify(Buffer.from(entry.message, "utf8"), new Uint8Array(sig), pub)) bad("Signature check failed", 401);
+      const existing = game.findByWallet(body.wallet);
+      let p, linked = false, switched = false;
+      if (existing) { p = existing; switched = !!caller && caller.id !== existing.id; }
+      else if (caller && !caller.wallet) { p = caller; game.linkWallet(p, body.wallet); linked = true; }
+      else p = game.createPlayer(body.name, body.wallet);
+      game.touchPlayer(p);
+      const token = game.newSession(p);
+      await game.saveNow([p]);
+      return sessionReply(p, token, { linked, switched });
+    },
+    "POST /api/logout": ({ p, req }) => { game.dropSession(p, req.headers.authorization); return { ok: true }; },
 
-// ---- leaderboard (cached 3s) --------------------------------------------------------------
-let boardCache = { t: 0, v: null };
-function board() {
-  if (boardCache.v && Date.now() - boardCache.t < 3000) return boardCache.v;
-  const t = now();
-  const ranked = Object.values(db.players).filter((p) => p.power > 0).map((p) => ({ p, pts: pointsOf(p) }))
-    .sort((a, b) => b.pts - a.pts || a.p.created - b.p.created);
-  const rank = new Map(); ranked.forEach((r, i) => rank.set(r.p.id, i + 1));
-  const act = ranked.filter((r) => isActive(r.p, Math.min(t, seasonEnd())));
-  const v = { ranked, rank, players: act.length, global: act.reduce((s, r) => s + r.p.power, 0), minedAll: Object.values(db.players).reduce((s, p) => s + p.earned, 0) };
-  boardCache = { t: Date.now(), v };
-  return v;
-}
-const row = (r, i) => ({ rank: i + 1, name: r.p.name, level: r.p.level, power: Math.round(r.p.power), items: r.p.items, earned: r.p.earned, prize: prizeFor(i + 1), pts: r.pts });
-function seasonInfo() { return { start: db.season.start, end: seasonEnd(), now: now(), over: over(), days: C.SEASON_DAYS }; }
-function meInfo(p) {
-  const b = board(), rank = b.rank.get(p.id) || 0;
-  const t = Math.min(now(), seasonEnd());
-  const act = isActive(p, t), others = b.global - (act ? p.power : 0), players = b.players + (act ? 0 : 1);
-  const global = others + p.power, share = global ? p.power / global : 0;
-  const perDay = over() ? 0 : Math.min(C.DAILY * Math.min(1, players / C.FULL_PLAYERS) * share, C.DAILY * C.PLAYER_DAILY_CAP);
-  return { id: p.id, name: p.name, balance: p.balance, earned: p.earned, pages: p.pages, claimed: !!p.claimed, rank, prize: rank ? prizeFor(rank) : 0,
-    pts: pointsOf(p), myPower: p.power, global, players, perDay, season: seasonInfo(), minedAll: b.minedAll };
-}
+    "POST /api/sync": ({ p }) => { game.touchPlayer(p); return game.view(p); },
+    "GET /api/me": ({ p }) => { game.touchPlayer(p); return game.view(p); },
+    "POST /api/act": ({ p, body }) => {
+      limit("act:" + p.id, 240, 60e3);
+      const res = game.act(p, body);
+      return { ok: true, ...res, ...game.view(p) };
+    },
 
-// ---- API ----------------------------------------------------------------------------------------
-const RATE_LIMIT = +process.env.RATE_LIMIT || 240; // requests per minute per IP (set TRUST_PROXY=1 behind a reverse proxy)
-const hits = new Map();
-setInterval(() => hits.clear(), 60000).unref();
-function auth(req) {
-  const m = /^Bearer ([0-9a-f]{12})\.([0-9a-f]{48})$/.exec(req.headers.authorization || "");
-  const p = m && db.players[m[1]];
-  return p && p.key === sha(m[2]) ? p : null;
-}
-const routes = {
-  "POST /api/register": (req, body) => {
-    const id = crypto.randomBytes(6).toString("hex"), secret = crypto.randomBytes(24).toString("hex"), t = now();
-    db.players[id] = { id, key: sha(secret), name: uniqueName(body.name), created: t, lastSeen: t, level: 1, power: 0, items: 0, tomes: 0, pages: 1, balance: 0, earned: 0, claimed: false };
-    dirty = true; boardCache.v = null;
-    return { token: id + "." + secret, ...meInfo(db.players[id]) };
-  },
-  "POST /api/sync": (req, body, p) => {
-    const t = now();
-    p.lastSeen = t;
-    if (!over()) {
-      p.level = clamp(Math.floor(num(body.level)), p.level, maxLevel(p, t)); // level never goes down
-      p.items = clamp(Math.floor(num(body.items)), p.items, maxItems(p, t));
-      p.power = clamp(Math.round(num(body.power)), 1, maxPower(p.level, p.items));
-    }
-    dirty = true; boardCache.v = null;
-    return meInfo(p);
-  },
-  "POST /api/buy": (req, body, p) => {
-    let cost;
-    if (body.item === "page") {
-      if (p.pages >= C.MAX_PAGES) return { ok: false, error: "All pages unlocked", ...meInfo(p) };
-      cost = PAGE_COST[p.pages];
-    } else cost = PRICES[body.item];
-    if (cost == null) return { ok: false, error: "Unknown item", ...meInfo(p) };
-    if (p.balance < cost) return { ok: false, error: "Not enough $MINE", ...meInfo(p) };
-    p.balance -= cost;
-    if (body.item === "page") p.pages++;
-    if (body.item === "tome") p.tomes++;
-    dirty = true;
-    return { ok: true, ...meInfo(p) };
-  },
-  "POST /api/rename": (req, body, p) => {
-    const n = cleanName(body.name);
-    if (n.length < 2) return { ok: false, error: "Name must be 2-16 letters/numbers", ...meInfo(p) };
-    p.name = uniqueName(n, p.id); dirty = true; boardCache.v = null;
-    return { ok: true, ...meInfo(p) };
-  },
-  "POST /api/claim": (req, body, p) => {
-    if (!over()) return { ok: false, error: "Season is still running", ...meInfo(p) };
-    if (p.claimed) return { ok: false, error: "Already claimed", ...meInfo(p) };
-    const rank = board().rank.get(p.id) || 0, prize = prizeFor(rank);
-    p.claimed = true; p.balance += prize; p.earned += 0; dirty = true;
-    return { ok: true, paid: prize, ...meInfo(p) };
-  },
-  "GET /api/leaderboard": (req, body, p) => {
-    const b = board();
-    return { season: seasonInfo(), players: b.players, global: b.global, minedAll: b.minedAll, total: b.ranked.length,
-      rows: b.ranked.slice(0, C.LB_SIZE).map(row), me: p ? { ...row({ p, pts: pointsOf(p) }, (b.rank.get(p.id) || b.ranked.length + 1) - 1), name: p.name } : null };
-  },
-  "GET /api/health": () => ({ ok: true, now: now() }),
-};
+    "GET /api/bank": ({ p }) => { game.touchPlayer(p); return { ...bank.bankView(p), ...bank.publicConfig() }; },
+    "POST /api/bank/deposit/prepare": ({ p, body }) => { limit("bank:" + p.id, 30, 60e3); return bank.prepareDeposit(p, body.amount); },
+    "POST /api/bank/deposit/confirm": ({ p, body }) => { limit("bank:" + p.id, 60, 60e3); return bank.confirmDeposit(p, body.signature).then(async (r) => ({ ...r, ...game.view(p) })); },
+    "POST /api/bank/withdraw": ({ p, body }) => { limit("bank:" + p.id, 30, 60e3); return bank.requestWithdraw(p, body.amount).then((r) => ({ ...r, ...game.view(p) })); },
+    "POST /api/pack/mine": ({ p, body }) => { limit("bank:" + p.id, 30, 60e3); return bank.buyPackWithMine(p, body.pack).then((r) => ({ ...r, ...game.view(p) })); },
+    "POST /api/pack/order": ({ p, body }) => { limit("bank:" + p.id, 30, 60e3); return bank.createPackOrder(p, body.pack); },
+    "POST /api/pack/confirm": ({ p, body }) => { limit("bank:" + p.id, 60, 60e3); return bank.confirmPackOrder(p, body.order, body.signature).then((r) => ({ ...r, ...game.view(p) })); },
+  };
+  const PUBLIC = new Set(["GET /api/health", "GET /api/config", "GET /api/leaderboard", "POST /api/guest", "POST /api/auth/nonce", "POST /api/auth/wallet"]);
 
-const MIME = { ".html": "text/html; charset=utf-8", ".css": "text/css", ".js": "text/javascript", ".png": "image/png", ".svg": "image/svg+xml", ".ico": "image/x-icon" };
-function serveStatic(req, res) {
-  let u = decodeURIComponent(new URL(req.url, "http://x").pathname);
-  if (u === "/") u = "/index.html";
-  if (!/^\/(index\.html|(css|js)\/[\w.\-]+\.(css|js))$/.test(u)) { res.writeHead(404); return res.end("Not found"); } // never serve /server
-  fs.readFile(path.join(ROOT, u), (err, buf) => {
-    if (err) { res.writeHead(404); return res.end("Not found"); }
-    res.writeHead(200, { "Content-Type": MIME[path.extname(u)] || "application/octet-stream", "Cache-Control": "no-cache" }); res.end(buf);
+  // ---- static files (whitelist only: never serve /server, .git, data files...) ------------------------------------
+  const VENDOR = [["node_modules", "@solana", "web3.js", "lib", "index.iife.min.js"], ["node_modules", "@solana", "web3.js", "lib", "index.iife.js"]].map((a) => path.join(ROOT, ...a));
+  const STATIC_RE = /^\/(index\.html|(css|js)\/[\w.\-]+\.(css|js)|vendor\/solana-web3\.js)$/;
+  function serveStatic(req, res) {
+    let u; try { u = decodeURIComponent(new URL(req.url, "http://x").pathname); } catch { res.writeHead(400, SEC); return res.end("Bad request"); }
+    if (u === "/") u = "/index.html";
+    if (req.method !== "GET" && req.method !== "HEAD") { res.writeHead(405, SEC); return res.end(); }
+    if (!STATIC_RE.test(u)) { res.writeHead(404, SEC); return res.end("Not found"); }
+    const file = u === "/vendor/solana-web3.js" ? VENDOR.find((f) => fs.existsSync(f)) : path.join(ROOT, u);
+    if (!file) { res.writeHead(404, SEC); return res.end("Wallet library not installed — run npm install"); }
+    fs.readFile(file, (err, buf) => {
+      if (err) { res.writeHead(404, SEC); return res.end("Not found"); }
+      res.writeHead(200, { ...SEC, "Content-Type": MIME[path.extname(file)] || "application/octet-stream", "Cache-Control": "no-cache" });
+      res.end(req.method === "HEAD" ? undefined : buf);
+    });
+  }
+
+  function send(req, res, code, obj) {
+    const body = Buffer.from(JSON.stringify(obj, (k, v) => (typeof v === "bigint" ? v.toString() : v)));
+    const h = { ...SEC, "Content-Type": "application/json", "Cache-Control": "no-store" };
+    if (body.length > 1024 && /\bgzip\b/.test(req.headers["accept-encoding"] || "")) {
+      zlib.gzip(body, (e, z) => { if (e) { res.writeHead(code, h); res.end(body); } else { res.writeHead(code, { ...h, "Content-Encoding": "gzip" }); res.end(z); } });
+    } else { res.writeHead(code, h); res.end(body); }
+  }
+
+  const server = http.createServer((req, res) => {
+    const pathname = new URL(req.url, "http://x").pathname;
+    if (!pathname.startsWith("/api/")) return serveStatic(req, res);
+    // no CORS headers on purpose: the API is only for the game page served from this very origin
+    const ip = clientIp(req);
+    try { limit("ip:" + ip, RATE, 60e3); } catch (e) { return send(req, res, 429, { error: e.message }); }
+    const key = req.method + " " + pathname, handler = routes[key];
+    if (!handler) return send(req, res, 404, { error: "Unknown endpoint" });
+    let raw = "", tooBig = false;
+    req.on("data", (c) => { raw += c; if (raw.length > 10000) { tooBig = true; req.destroy(); } });
+    req.on("end", async () => {
+      if (tooBig) return;
+      try {
+        let body = {};
+        if (raw) { try { body = JSON.parse(raw); } catch { bad("Bad JSON"); } if (body === null || typeof body !== "object" || Array.isArray(body)) bad("Bad JSON"); }
+        const p = auth(req);
+        if (!p && !PUBLIC.has(key)) bad("Not signed in", 401);
+        const host = String(req.headers.host || "localhost").replace(/[^A-Za-z0-9.\-:]/g, "").slice(0, 80);
+        send(req, res, 200, await handler({ req, body, p, ip, host }));
+      } catch (e) {
+        if (e instanceof ApiError) return send(req, res, e.status, { error: e.message, ...(e.extra || {}) });
+        console.error(e); send(req, res, 500, { error: "Server error" });
+      }
+    });
   });
+
+  // ---- background jobs ---------------------------------------------------------------------------------------------
+  const timers = [];
+  const every = (ms, fn) => { const t = setInterval(() => { Promise.resolve().then(fn).catch((e) => console.error("job failed:", e.message)); }, ms); t.unref(); timers.push(t); };
+  async function shutdown() { timers.forEach(clearInterval); try { await game.flush(); await store.close(); } catch (e) { console.error(e); } }
+  function start(port) {
+    every(5000, () => game.tick());
+    every(8000, () => game.flush());
+    every(10000, () => bank.processWithdrawals());
+    every(3600e3, () => game.prune());
+    bank.kick();
+    // Render's free plan puts the service to sleep after ~15 min without visitors: ping our own public URL.
+    // (An external pinger like UptimeRobot on /api/health works too and can also wake it up after a restart.)
+    const selfUrl = env.KEEPALIVE_URL || env.RENDER_EXTERNAL_URL;
+    if (selfUrl && env.KEEPALIVE !== "off") every(10 * 60e3, () => fetch(selfUrl.replace(/\/$/, "") + "/api/health").then(() => {}, () => {}));
+    return new Promise((r) => server.listen(port, r));
+  }
+  return { server, game, bank, chain, store, start, shutdown, routes, resetLimits: () => buckets.clear() };
 }
-const server = http.createServer((req, res) => {
-  const cors = { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Headers": "Content-Type, Authorization", "Access-Control-Allow-Methods": "GET, POST, OPTIONS" };
-  if (req.method === "OPTIONS") { res.writeHead(204, cors); return res.end(); }
-  const path_ = new URL(req.url, "http://x").pathname;
-  if (!path_.startsWith("/api/")) return serveStatic(req, res);
-  const send = (code, obj) => { res.writeHead(code, { ...cors, "Content-Type": "application/json" }); res.end(JSON.stringify(obj)); };
-  const ip = (process.env.TRUST_PROXY && String(req.headers["x-forwarded-for"] || "").split(",")[0].trim()) || req.socket.remoteAddress, n = (hits.get(ip) || 0) + 1; hits.set(ip, n);
-  if (n > RATE_LIMIT) return send(429, { error: "Too many requests" });
-  const handler = routes[req.method + " " + path_];
-  if (!handler) return send(404, { error: "Unknown endpoint" });
-  let raw = "";
-  req.on("data", (c) => { raw += c; if (raw.length > 10000) req.destroy(); });
-  req.on("end", () => {
-    let body = {}; try { body = raw ? JSON.parse(raw) : {}; } catch { return send(400, { error: "Bad JSON" }); }
-    const p = auth(req);
-    if (!p && !["POST /api/register", "GET /api/leaderboard", "GET /api/health"].includes(req.method + " " + path_)) return send(401, { error: "Not signed in" });
-    try { send(200, handler(req, body, p)); } catch (e) { console.error(e); send(500, { error: "Server error" }); }
-  });
-});
+
 if (require.main === module) {
-  server.listen(PORT, () => console.log(`Idle Miner server on http://localhost:${PORT}  (season ends ${new Date(seasonEnd()).toISOString()})`));
+  (async () => {
+    const app = await createApp();
+    const port = num(env.PORT, 3000);
+    await app.start(port);
+    const { game, chain } = app;
+    console.log(`Idle Miner on http://localhost:${port}  | store: ${app.store.kind} | solana: ${SOL.cluster} | $MINE ${chain.tokenEnabled ? "on" : "OFF (" + chain.missing.join(", ") + ")"} | SOL packs ${chain.payEnabled ? "on" : "OFF"}`);
+    if (app.store.kind === "file" && env.RENDER) console.warn("WARNING: running on Render without DATABASE_URL — player data is stored on an ephemeral disk and WILL be lost on restart. Set DATABASE_URL.");
+    let closing = false;
+    for (const sig of ["SIGINT", "SIGTERM"]) process.on(sig, async () => { if (closing) return; closing = true; await app.shutdown(); process.exit(0); });
+  })().catch((e) => { console.error("Failed to start:", e); process.exit(1); });
 }
-module.exports = { server, tick, db, C };
+module.exports = { createApp };

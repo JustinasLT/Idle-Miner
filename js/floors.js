@@ -38,19 +38,12 @@ let shaftsBuilt = false;
     return row;
   }
 
-  function buyShaftUnlock(floorIndex) {
+  async function buyShaftUnlock(floorIndex) {
     const mine = activeMine();
     if (floorIndex !== mine.unlockedShaftCount) return;
-    const cost = shaftUnlockCost(floorIndex);
-    if (state.cash < cost) {
-      toast("Not enough cash");
-      return;
-    }
-    state.cash -= cost;
-    mine.unlockedShaftCount += 1;
-    mine.shafts[floorIndex].stock = 0;
-    saveState();
-    buildShafts();
+    if (state.cash < shaftUnlockCost(floorIndex)) return toast("Not enough cash");
+    const j = await netAct({ type: "unlockFloor" });
+    if (!j.ok) return toast(j.error);
     renderHUD();
     toast("Floor " + (floorIndex + 1) + " unlocked! ⛏️");
   }

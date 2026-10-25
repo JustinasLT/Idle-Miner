@@ -1,5 +1,6 @@
 "use strict";
 let lastTick = performance.now();
+const PANELS = { hero: () => renderHero(), ranks: () => renderRanks(), packs: () => renderPacks(), bank: () => renderBank(), shop: () => renderShop(), research: () => renderResearch() };
 function setupNav() {
   document.querySelectorAll(".nav-btn").forEach((btn) => btn.addEventListener("click", () => {
     document.querySelectorAll(".nav-btn").forEach((b) => b.classList.remove("active"));
@@ -9,7 +10,7 @@ function setupNav() {
     $("app").classList.toggle("panel-open", p !== "mine"); // game view stays in layout, so the nav never jumps
     if (p === "mine") return;
     $("panel-" + p).classList.remove("hidden");
-    ({ hero: renderHero, ranks: renderRanks, world: renderContinents, shop: renderShop, research: renderResearch, events: renderEvents })[p]();
+    PANELS[p]();
   }));
 }
 function setupPrestige() {
@@ -20,13 +21,11 @@ function setupPrestige() {
     $("prestige-modal").classList.remove("hidden");
   };
   $("btn-prestige-cancel").onclick = () => $("prestige-modal").classList.add("hidden");
-  $("btn-prestige-confirm").onclick = () => {
-    const m = activeMine();
-    m.prestigeMult *= 2; m.warehouse.level = 1; m.elevator.level = 1; m.unlockedShaftCount = 1;
-    m.shafts.forEach((sh) => { sh.level = 1; sh.stock = 0; });
-    state.cash = 0; resetSims(); m.pile = { u: 0, v: 0 };
+  $("btn-prestige-confirm").onclick = async () => {
     $("prestige-modal").classList.add("hidden");
-    saveState(); buildShafts(); renderHUD(); toast("Prestiged! Earnings ×" + m.prestigeMult + " 🌟");
+    const r = await netAct({ type: "prestige" });
+    if (!r.ok) return toast(r.error);
+    resetSims(); buildShafts(); renderHUD(); toast("Prestiged! Earnings ×" + activeMine().prestigeMult + " 🌟");
   };
   $("prestige-badge").addEventListener("dblclick", open);
   $("cash-display").addEventListener("dblclick", open);
@@ -42,21 +41,18 @@ function init() {
   rs.setProperty("--surface-h", L.surface + "px"); rs.setProperty("--grass-h", L.grass + "px");
   rs.setProperty("--floor-h", L.floor + "px"); rs.setProperty("--head-h", L.head + "px");
   rs.setProperty("--tunnel-h", L.tunnel + "px"); rs.setProperty("--headframe-h", L.headframe + "px");
-  Object.values(state.mines).forEach(ensureMineShape);
-  initHero();
+  computeFx();
   $("hero-content").addEventListener("click", heroClick);
   $("dyn-modal").addEventListener("click", (e) => { if (e.target.id === "dyn-modal") closeModal(); });
-  applyOfflineEarnings();
   buildShafts();
-  setupNav(); setupPrestige(); setupRanks();
+  setupNav(); setupPrestige(); setupRanks(); setupLogin(); setupPacks(); setupBank();
   document.querySelectorAll("[data-upgrade]").forEach((b) => (b.onclick = () => openUpgrade(b.dataset.upgrade)));
   $("scroll-up").onclick = () => $("world-scroll").scrollBy({ top: -240, behavior: "smooth" });
   $("scroll-down").onclick = () => $("world-scroll").scrollBy({ top: 240, behavior: "smooth" });
   $("btn-claim-offline").onclick = () => claimOffline(false);
   $("btn-double-offline").onclick = () => claimOffline(true);
-  setInterval(saveState, 15000);
-  startNet();
   renderHUD();
   requestAnimationFrame(loop);
+  bootSession();   // sign in with a saved session, or show the login screen
 }
 init();

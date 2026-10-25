@@ -1,0 +1,499 @@
+"use strict";
+// The authoritative game engine. The browser only sends *intents* ("upgrade floor 3 once");
+// every number — cash, items, hero level, $MINE — is computed here from the SERVER clock.
+const crypto = require("crypto");
+const S = require("../js/shared.js");
+const { C, PRICES, SOL, PACKS, env, num } = require("./config.js");
+
+class ApiError extends Error { constructor(status, msg, extra) { super(msg); this.status = status; this.extra = extra; } }
+const bad = (msg, status = 400) => { throw new ApiError(status, msg); };
+
+const DAY = 864e5;
+const DROP_MULT = num(env.DROP_MULT, 1); // testing only
+const rng = () => crypto.randomInt(0, 2 ** 47) / 2 ** 47;
+const rnd = (a, b) => a + rng() * (b - a);
+const clamp = (x, a, b) => Math.max(a, Math.min(b, x));
+const sha = (s) => crypto.createHash("sha256").update(s).digest("hex");
+const intIn = (x, a, b, what = "value") => { if (!Number.isInteger(x) || x < a || x > b) bad("Invalid " + what); return x; };
+const cleanName = (s) => String(s || "").replace(/[^A-Za-z0-9 _.\-]/g, "").trim().replace(/\s+/g, " ").slice(0, 16);
+
+function createGame({ store, now: nowFn }) {
+  let clockOffset = 0;
+  const now = nowFn || (() => Date.now() + clockOffset + (num(env.DEV_DAY_OFFSET, 0)) * DAY);
+  const db = { season: null, players: {}, lastTick: 0, bonus: 0, withdrawals: {}, orders: {} };
+  const byWallet = new Map(), dirty = new Set();
+  let metaDirty = false, boardCache = { t: 0, v: null };
+  const touch = (p) => { if (p) dirty.add(p.id); boardCache.v = null; };
+  const touchMeta = () => { metaDirty = true; };
+
+  // ---- persistence ------------------------------------------------------------------------------
+  const meta = () => ({ season: db.season, lastTick: db.lastTick, bonus: db.bonus, withdrawals: db.withdrawals, orders: db.orders });
+  async function load() {
+    const d = await store.load();
+    db.players = d.players || {};
+    Object.assign(db, { season: null, lastTick: 0, bonus: 0, withdrawals: {}, orders: {} }, d.meta || {});
+    // players saved by the old browser-trusting version have no server-side game state: forget them
+    const legacy = Object.keys(db.players).filter((id) => !db.players[id].mines || !db.players[id].sessions);
+    legacy.forEach((id) => delete db.players[id]);
+    if (legacy.length) await store.removePlayers(legacy);
+    for (const p of Object.values(db.players)) if (p.wallet) byWallet.set(p.wallet, p);
+    if (!db.season) { db.season = { start: env.SEASON_START ? Date.parse(env.SEASON_START) : now() }; db.lastTick = now(); touchMeta(); }
+  }
+  async function flush() {
+    if (!dirty.size && !metaDirty) return;
+    const list = [...dirty].map((id) => db.players[id]).filter(Boolean), m = metaDirty ? meta() : null;
+    dirty.clear(); metaDirty = false;
+    try { await store.save(list, m); } catch (e) { list.forEach((p) => dirty.add(p.id)); if (m) metaDirty = true; throw e; }
+  }
+
+  // durable write of some players + all shared data (optionally claiming a used blockchain signature in the same atomic step)
+  async function saveNow(players, claim) {
+    const m = meta(); metaDirty = false;
+    players.forEach((p) => dirty.delete(p.id));
+    try { return await store.save(players, m, claim); }
+    catch (e) { players.forEach((p) => dirty.add(p.id)); metaDirty = true; throw e; }
+  }
+
+  // ---- players ------------------------------------------------------------------------------------
+  const seasonEnd = () => db.season.start + C.SEASON_MS;
+  const over = () => now() >= seasonEnd();
+  const isActive = (p, t) => p.power > 0 && t - p.lastSeen < C.ACTIVE_MS;
+  const isPaid = (p) => !!(p.packs && (p.packs[1] || p.packs[2] || p.packs[3]));
+  const defaultMine = () => ({ prestigeMult: 1, warehouse: { level: 1 }, elevator: { level: 1 }, shafts: Array.from({ length: S.TOTAL_FLOORS }, () => ({ level: 1 })), unlockedShaftCount: 1 });
+
+  function uniqueName(want, selfId) {
+    let n = cleanName(want); if (n.length < 2) n = "Miner";
+    const taken = (x) => Object.values(db.players).some((p) => p.id !== selfId && p.name.toLowerCase() === x.toLowerCase());
+    let out = n, k = 1;
+    while (taken(out)) out = n.slice(0, 12) + (++k > 9 ? Math.floor(Math.random() * 9000 + 1000) : k);
+    return out;
+  }
+  function createPlayer(name, wallet) {
+    const t = now(), id = crypto.randomBytes(6).toString("hex");
+    const p = {
+      id, sessions: [], wallet: wallet || null, name: uniqueName(name || "Miner" + Math.floor(1000 + Math.random() * 9000)),
+      created: t, lastSeen: t, settledAt: t, packs: {},
+      cash: 50, mines: { start: defaultMine() }, researchUnlocked: [], boosts: { elev: 0, mine: 0, sell: 0 },
+      stats: { totalEarned: 0 }, hero: { lvl: 1, xp: 0, pE: 0, pL: 0, n: 0, day: "", crates: 0 },
+      inv: [], eq: {}, nextId: 1, invPages: 1, pendingOffline: 0, freeMoneyAt: 0, wear: 0,
+      balance: 0, earned: 0, items: 0, claimed: false, power: 0, history: [], withdrawLog: [], lastWithdrawAt: 0, events: [],
+    };
+    ["Pickaxe", "Shoes", "Helmet"].forEach((s) => { const it = genItem(p, 1, s, 0); p.inv.push(it); p.eq[s] = it.id; });
+    p.power = S.heroPower(p);
+    db.players[id] = p; if (wallet) byWallet.set(wallet, p);
+    touch(p);
+    return p;
+  }
+  const findByWallet = (w) => byWallet.get(w) || null;
+  function linkWallet(p, wallet) { p.wallet = wallet; byWallet.set(wallet, p); touch(p); }
+
+  // sessions: random 192-bit secret, only its hash is stored
+  function newSession(p) {
+    const secret = crypto.randomBytes(24).toString("hex"), t = now();
+    p.sessions = p.sessions.filter((s) => t - s.last < 60 * DAY).slice(-4);
+    p.sessions.push({ h: sha(secret), last: t });
+    touch(p);
+    return p.id + "." + secret;
+  }
+  function authToken(header) {
+    const m = /^Bearer ([0-9a-f]{12})\.([0-9a-f]{48})$/.exec(header || "");
+    const p = m && db.players[m[1]];
+    if (!p) return null;
+    const h = Buffer.from(sha(m[2]), "hex");
+    const s = p.sessions.find((x) => crypto.timingSafeEqual(Buffer.from(x.h, "hex"), h));
+    if (!s) return null;
+    s.last = now();
+    return p;
+  }
+  function dropSession(p, header) {
+    const m = /^Bearer ([0-9a-f]{12})\.([0-9a-f]{48})$/.exec(header || "");
+    if (m) { const h = sha(m[2]); p.sessions = p.sessions.filter((s) => s.h !== h); touch(p); }
+  }
+
+  // ---- hero / items ---------------------------------------------------------------------------------
+  function addXp(p, x) {
+    const h = p.hero;
+    h.xp += x;
+    while (h.lvl < 100 && h.xp >= S.xpNeed(h.lvl)) { h.xp -= S.xpNeed(h.lvl); h.lvl++; evt(p, "Hero reached level " + h.lvl + "!"); }
+    if (h.lvl >= 100) h.xp = Math.min(h.xp, S.xpNeed(100));
+  }
+  function evt(p, text) { p.events.push(text); if (p.events.length > 20) p.events.shift(); }
+
+  function rollRarity(p, d) { // d = floor depth: deeper floors favour better rarities
+    const h = p.hero;
+    h.pE++; h.pL++;
+    const minR = h.pL >= 500 || rng() < Math.max(0, (h.pL - 300) * 0.005) ? 4 : h.pE >= 50 ? 3 : 0;
+    const w = S.RARITIES.map((x, i) => (i < minR ? 0 : x.w0 * Math.exp((x.k * d) / 30)));
+    let u = rng() * w.reduce((a, b) => a + b), r = 0;
+    for (; r < 5; r++) { if (u <= w[r]) break; u -= w[r]; }
+    if (r >= 3) h.pE = 0;
+    if (r >= 4) h.pL = 0;
+    return r;
+  }
+  const rollItemLevel = (p) => Math.max(1, p.hero.lvl + Math.floor(rnd(-S.ITEM_LVL_SPREAD, S.ITEM_LVL_SPREAD + 1)));
+  function genItem(p, lvl, slot, r, depth) {
+    slot = slot || S.SLOTS[Math.floor(rng() * 8)];
+    if (r == null) r = rollRarity(p, depth || 1);
+    const R = S.RARITIES[r], f = 1 + 0.03 * (lvl - 1);
+    const it = { id: p.nextId++, slot, r, il: lvl, v: (S.SLOT_STAT[slot][2] / 100) * R.m * f * rnd(0.9, 1.1), dur: R.dur, max: R.dur, aff: [], lock: false };
+    const mk = (k) => it.aff.push({ k, v: (S.AFFIXES[k][1] / 100) * Math.sqrt(R.m) * f * rnd(0.9, 1.1) });
+    if (slot === "Amulet") mk("drop");
+    const pool = Object.keys(S.AFFIXES).filter((k) => k !== "drop" || slot !== "Amulet");
+    const want = Math.min(R.aff, pool.length);
+    while (it.aff.length - (slot === "Amulet" ? 1 : 0) < want) {
+      const k = pool[Math.floor(rng() * pool.length)];
+      if (!it.aff.some((a) => a.k === k)) mk(k);
+    }
+    return it;
+  }
+  function giveItem(p, it, where) {
+    p.items++; // counts towards the leaderboard
+    if (S.spareItems(p).length >= S.invCap(p)) {
+      const v = S.sellValue(it); p.cash += v;
+      evt(p, "Backpack full — auto-sold " + S.RARITIES[it.r].n + " " + it.slot + " for $" + Math.floor(v));
+      return;
+    }
+    p.inv.push(it);
+    evt(p, "✨ " + S.RARITIES[it.r].n + " " + it.slot + " " + where);
+  }
+  function autoEquip(p) {
+    S.SLOTS.forEach((s) => {
+      const q = (i) => i.v * (i.dur ? 1 : 0.25);
+      const best = p.inv.filter((i) => i.slot === s && S.canEquip(p, i)).sort((x, y) => q(y) - q(x))[0];
+      if (best) p.eq[s] = best.id;
+    });
+  }
+
+  // ---- time: income, xp, wear and drops are all paid from SERVER time ------------------------------------
+  function settle(p, t = now()) {
+    const gap = t - p.settledAt;
+    if (!(gap > 0)) return;
+    p.settledAt = t;
+    const online = gap <= C.ONLINE_GRACE_MS;
+    const span = online ? gap : Math.min(gap, C.OFFLINE_MAX_MS); // never more than 8 hours of offline income
+    const t0 = t - gap, t1 = t0 + span;
+    const cuts = [t0, t1];
+    for (const k of ["elev", "mine", "sell"]) { const e = p.boosts[k]; if (e > t0 && e < t1) cuts.push(e); }
+    cuts.sort((a, b) => a - b);
+    let cash = 0;
+    for (let i = 0; i + 1 < cuts.length; i++) cash += S.income(p, cuts[i]).perSec * ((cuts[i + 1] - cuts[i]) / 1000);
+    if (!(cash >= 0) || !isFinite(cash)) cash = 0;
+    if (!online) {
+      const rm = S.ctx(p, t0).rm;
+      p.pendingOffline += cash * C.OFFLINE_CASH_RATE * rm.offlineMult;
+      return;
+    }
+    p.cash += cash; p.stats.totalEarned += cash;
+    const dt = span / 1000, c = S.ctx(p, t0);
+    addXp(p, dt * 0.2 * (1 + c.fx.xp));
+    p.wear += (dt * (1 - c.fx.guard)) / 360; // 1 durability per 6 min
+    if (p.wear >= 1) {
+      const w = Math.floor(p.wear); p.wear -= w;
+      for (const s of S.SLOTS) {
+        const it = S.itemById(p, p.eq[s]);
+        if (it && it.dur > 0) { it.dur = Math.max(0, it.dur - w); if (it.dur === 0) evt(p, "💥 " + S.RARITIES[it.r].n + " " + it.slot + " broke!"); }
+      }
+    }
+    rollDrops(p, t0, dt);
+    p.power = S.heroPower(p);
+  }
+  function rollDrops(p, t0, dt) {
+    const h = p.hero, today = new Date(t0).toISOString().slice(0, 10);
+    if (h.day !== today) { h.day = today; h.n = 0; }
+    const { c, trips } = S.tripsPerSec(p, t0);
+    const w = trips.map((tr, i) => tr * (1 + 0.025 * (i + 1))), W = w.reduce((a, b) => a + b, 0), T = trips.reduce((a, b) => a + b, 0);
+    if (!(T > 0)) return;
+    let remaining = T * dt, guard = 0;
+    while (guard++ < 2000) {
+      const pAvg = (S.DROP_P0 * DROP_MULT * (W / T) * (1 + c.fx.drop)) / (1 + h.n / 40);
+      if (!(pAvg > 0)) break;
+      const k = pAvg >= 1 ? 0 : Math.floor(Math.log(1 - rng()) / Math.log(1 - pAvg)); // trips until the next drop
+      if (k + 1 > remaining) break;
+      remaining -= k + 1;
+      let u = rng() * W, i = 0;
+      for (; i < w.length - 1; i++) { if (u <= w[i]) break; u -= w[i]; }
+      h.n++;
+      if (rng() < 0.25) { h.crates++; evt(p, "📦 Equipment crate found on floor " + (i + 1) + "!"); }
+      else giveItem(p, genItem(p, rollItemLevel(p), null, null, i + 1), "dropped on floor " + (i + 1) + "!");
+    }
+  }
+
+  // ---- $MINE emission: every 5s the season's daily pool is split by power share ------------------
+  const room = (p) => (isPaid(p) ? Infinity : Math.max(0, C.FREE_EARN_CAP - p.earned)); // free players stop at 20 000
+  function tick() {
+    const t = now(), upto = Math.min(t, seasonEnd());
+    const dt = clamp((upto - db.lastTick) / 1000, 0, 60); // downtime is not paid out
+    if (upto > db.lastTick) { db.lastTick = upto; touchMeta(); }
+    if (dt <= 0) return;
+    const act = Object.values(db.players).filter((p) => isActive(p, upto));
+    if (!act.length) return;
+    const G = act.reduce((s, p) => s + p.power, 0);
+    const pool = (C.DAILY * Math.min(1, act.length / C.FULL_PLAYERS) * dt) / 86400, cap = (C.DAILY * C.PLAYER_DAILY_CAP * dt) / 86400;
+    for (const p of act) {
+      let g = Math.min((pool * p.power) / G, cap);
+      if (upto - p.lastSeen <= C.ONLINE_GRACE_MS && p.earned < C.ONBOARD_CAP) { // fast start: the first 20 000 $MINE of an active player
+        const fast = Math.min(C.ONBOARD_RATE * dt, C.ONBOARD_CAP - p.earned);
+        if (fast > g) { db.bonus += fast - g; g = fast; }
+      }
+      g = Math.min(g, room(p));
+      if (g > 0) { p.balance += g; p.earned += g; touch(p); }
+    }
+  }
+
+  // ---- leaderboard ---------------------------------------------------------------------------------------
+  const pointsOf = (p) => Math.floor(p.power + p.hero.lvl * 20 + p.items * 5 + p.earned * 0.1);
+  let prizeW = null;
+  function prizeFor(rank) {
+    if (rank < 1 || rank > C.LB_SIZE) return 0;
+    if (!prizeW) { prizeW = Array.from({ length: C.LB_SIZE }, (_, i) => 1 / Math.pow(i + 1, C.LB_PRIZE_EXP)); prizeW.sum = prizeW.reduce((a, b) => a + b, 0); }
+    return (C.LB_POOL * prizeW[rank - 1]) / prizeW.sum;
+  }
+  function board() {
+    if (boardCache.v && Date.now() - boardCache.t < 3000) return boardCache.v;
+    const t = now();
+    const ranked = Object.values(db.players).filter((p) => p.power > 0).map((p) => ({ p, pts: pointsOf(p) }))
+      .sort((a, b) => b.pts - a.pts || a.p.created - b.p.created);
+    const rank = new Map(); ranked.forEach((r, i) => rank.set(r.p.id, i + 1));
+    const act = ranked.filter((r) => isActive(r.p, Math.min(t, seasonEnd())));
+    const v = { ranked, rank, players: act.length, global: act.reduce((s, r) => s + r.p.power, 0), minedAll: Object.values(db.players).reduce((s, p) => s + p.earned, 0) };
+    boardCache = { t: Date.now(), v };
+    return v;
+  }
+  const row = (r, i) => ({ rank: i + 1, name: r.p.name, level: r.p.hero.lvl, power: Math.round(r.p.power), items: r.p.items, earned: r.p.earned, prize: prizeFor(i + 1), pts: r.pts, pack: isPaid(r.p) });
+  const seasonInfo = () => ({ start: db.season.start, end: seasonEnd(), now: now(), over: over(), days: C.SEASON_DAYS });
+  function leaderboard(p) {
+    const b = board();
+    return { season: seasonInfo(), players: b.players, global: b.global, minedAll: b.minedAll, total: b.ranked.length,
+      rows: b.ranked.slice(0, C.LB_SIZE).map(row), me: p ? row({ p, pts: pointsOf(p) }, (b.rank.get(p.id) || b.ranked.length + 1) - 1) : null };
+  }
+
+  // ---- what the client gets to see ------------------------------------------------------------------------------
+  function mining(p) {
+    const b = board(), rank = b.rank.get(p.id) || 0, t = Math.min(now(), seasonEnd());
+    const act = isActive(p, t), others = b.global - (act ? p.power : 0), players = b.players + (act ? 0 : 1);
+    const global = others + p.power, share = global ? p.power / global : 0;
+    const perDay = over() ? 0 : Math.min(C.DAILY * Math.min(1, players / C.FULL_PLAYERS) * share, C.DAILY * C.PLAYER_DAILY_CAP);
+    const capped = !isPaid(p) && p.earned >= C.FREE_EARN_CAP;
+    const onboarding = p.earned < C.ONBOARD_CAP && !capped;
+    let perSec = capped || over() ? 0 : perDay / 86400;
+    if (onboarding && !over()) perSec = Math.max(perSec, C.ONBOARD_RATE);
+    return { rank, prize: rank ? prizeFor(rank) : 0, pts: pointsOf(p), global, players, perDay, perSec, share, minedAll: b.minedAll, capped, onboarding };
+  }
+  function view(p) {
+    const t = now(), inc = S.income(p, t), m = p.mines.start;
+    const out = {
+      serverNow: t, id: p.id, name: p.name, wallet: p.wallet, guest: !p.wallet, packs: p.packs, paid: isPaid(p),
+      cash: p.cash, balance: p.balance, earned: p.earned, totalEarned: p.stats.totalEarned, claimed: !!p.claimed,
+      mine: { prestigeMult: m.prestigeMult, warehouse: m.warehouse, elevator: m.elevator, shafts: m.shafts.map((s) => ({ level: s.level })), unlockedShaftCount: m.unlockedShaftCount },
+      researchUnlocked: p.researchUnlocked, boosts: p.boosts, hero: p.hero, inv: p.inv, eq: p.eq, invPages: p.invPages, items: p.items,
+      pendingOffline: p.pendingOffline, freeMoneyIn: Math.max(0, p.freeMoneyAt + C.FREE_MONEY_COOLDOWN_MS - t),
+      power: p.power, cashPerSec: inc.perSec, season: seasonInfo(), mining: mining(p),
+      free: { cap: C.FREE_EARN_CAP, onboardCap: C.ONBOARD_CAP, earned: p.earned },
+      events: p.events,
+    };
+    p.events = [];
+    return out;
+  }
+  // called for every authenticated request: settle time, then show the player
+  function touchPlayer(p) {
+    const t = now();
+    settle(p, t);
+    p.lastSeen = t;
+    touch(p);
+  }
+
+  // ---- player actions (every one is validated here) ------------------------------------------------------------
+  function spendMine(p, amount) {
+    if (p.balance < amount) bad("Not enough $MINE");
+    p.balance -= amount;
+  }
+  function addHistory(p, h) { p.history.unshift({ t: now(), ...h }); if (p.history.length > 40) p.history.length = 40; }
+
+  function grantPack(p, pack, how) {
+    if (p.packs[pack.id]) bad("You already own this pack");
+    p.packs[pack.id] = true;
+    addXp(p, pack.xp);
+    p.cash += pack.cash;
+    p.hero.crates += pack.crates;
+    for (const s of S.SLOTS) p.inv.push(genItem(p, p.hero.lvl, s, pack.gearRarity));
+    autoEquip(p);
+    p.power = S.heroPower(p);
+    addHistory(p, { type: "pack", pack: pack.id, how });
+    evt(p, "📦 " + pack.name + " pack unlocked!");
+    touch(p);
+  }
+
+  const SHOP_CASH = {
+    boost_mine: { cost: (m) => 1500 * S.shopScale(m), fn: (p, t) => boost(p, "mine", 3, t) },
+    crate: { cost: (m) => 3000 * S.shopScale(m), fn: (p) => { p.hero.crates++; } },
+    shaft5: { cost: (m) => 5000 * S.shopScale(m), fn: (p) => { const m = p.mines.start; for (let i = 0; i < m.unlockedShaftCount; i++) m.shafts[i].level += 5; } },
+    infra5: { cost: (m) => 8000 * S.shopScale(m), fn: (p) => { const m = p.mines.start; m.elevator.level += 5; m.warehouse.level += 5; } },
+  };
+  const SHOP_TOKEN = {
+    boost_sell: { cost: PRICES.boost_sell, fn: (p, t) => boost(p, "sell", 5, t) },
+    boost_elev: { cost: PRICES.boost_elev, fn: (p, t) => boost(p, "elev", 5, t) },
+    tome: { cost: PRICES.tome, fn: (p) => addXp(p, C.TOME_XP) },
+  };
+  const boost = (p, k, mins, t) => { p.boosts[k] = Math.max(t, p.boosts[k]) + mins * 60000; };
+
+  const ACTIONS = {
+    upgrade(p, b, t) {
+      const target = b.target;
+      if (!["warehouse", "elevator", "shaft"].includes(target)) bad("Unknown upgrade");
+      const m = p.mines.start;
+      const idx = target === "shaft" ? intIn(b.idx, 0, m.unlockedShaftCount - 1, "floor") : 0;
+      const info = S.upInfo(p, target, idx, t);
+      const n = b.n === "max" ? S.maxLevels(info, p.cash) : [1, 10, 50].includes(b.n) ? b.n : bad("Invalid amount");
+      if (n < 1) bad("Not enough cash");
+      const cost = S.upgradeCost(info.base, info.level, n, info.cm);
+      if (!(p.cash >= cost)) bad("Not enough cash");
+      p.cash -= cost;
+      if (target === "warehouse") m.warehouse.level += n; else if (target === "elevator") m.elevator.level += n; else m.shafts[idx].level += n;
+    },
+    unlockFloor(p, b) {
+      const m = p.mines.start, i = m.unlockedShaftCount;
+      if (i >= S.TOTAL_FLOORS) bad("All floors are unlocked");
+      const cost = S.shaftUnlockCost(i);
+      if (!(p.cash >= cost)) bad("Not enough cash");
+      p.cash -= cost; m.unlockedShaftCount++;
+    },
+    research(p, b) {
+      const node = S.RESEARCH_NODES.find((n) => n.id === b.id);
+      if (!node) bad("Unknown research");
+      if (p.researchUnlocked.includes(node.id)) bad("Already researched");
+      if (!(p.cash >= node.cost)) bad("Not enough cash");
+      p.cash -= node.cost; p.researchUnlocked.push(node.id);
+    },
+    prestige(p) {
+      const m = p.mines.start;
+      if (m.shafts.reduce((s, sh) => s + sh.level, 0) + m.warehouse.level + m.elevator.level < 50) bad("Reach 50+ total levels to Prestige");
+      m.prestigeMult *= 2; m.warehouse.level = 1; m.elevator.level = 1; m.unlockedShaftCount = 1;
+      m.shafts.forEach((sh) => (sh.level = 1));
+      p.cash = 0;
+    },
+    buy(p, b, t) {
+      const key = String(b.item);
+      if (key === "free_money") {
+        if (t < p.freeMoneyAt + C.FREE_MONEY_COOLDOWN_MS) bad("Free money is on cooldown");
+        const amt = Math.max(10000, p.stats.totalEarned * 0.5 + 5000);
+        p.cash += amt; p.freeMoneyAt = t;
+      } else if (SHOP_CASH[key]) {
+        const it = SHOP_CASH[key], cost = it.cost(p.mines.start);
+        if (!(p.cash >= cost)) bad("Not enough cash");
+        p.cash -= cost; it.fn(p, t);
+      } else if (SHOP_TOKEN[key]) {
+        spendMine(p, SHOP_TOKEN[key].cost); SHOP_TOKEN[key].fn(p, t);
+      } else if (key === "page") {
+        if (p.invPages >= C.MAX_PAGES) bad("All pages unlocked");
+        spendMine(p, S.PAGE_COST[p.invPages]); p.invPages++;
+      } else bad("Unknown item");
+    },
+    claimOffline(p, b) {
+      const amt = p.pendingOffline;
+      if (!(amt > 0)) bad("Nothing to collect");
+      const mult = b.double ? 2 : 1;
+      if (b.double) spendMine(p, PRICES.offline2);
+      p.cash += amt * mult; p.stats.totalEarned += amt * mult; p.pendingOffline = 0;
+    },
+    equip(p, b) {
+      const it = S.itemById(p, b.id);
+      if (!it) bad("No such item");
+      if (!S.canEquip(p, it)) bad("Hero must be level " + it.il + " to equip this");
+      p.eq[it.slot] = it.id;
+    },
+    unequip(p, b) { if (!S.SLOTS.includes(b.slot)) bad("Invalid slot"); delete p.eq[b.slot]; },
+    lock(p, b) { const it = S.itemById(p, b.id); if (!it) bad("No such item"); it.lock = !it.lock; },
+    sell(p, b) {
+      const it = S.itemById(p, b.id);
+      if (!it) bad("No such item");
+      if (it.lock) bad("Item is locked");
+      if (p.eq[it.slot] === it.id) bad("Unequip it first");
+      p.cash += S.sellValue(it); p.inv = p.inv.filter((i) => i !== it);
+    },
+    sellAll(p) {
+      const list = S.spareItems(p).filter((i) => !i.lock && i.r <= 2);
+      if (!list.length) bad("Nothing to sell — Epic+ and locked items are kept");
+      for (const it of list) p.cash += S.sellValue(it);
+      const gone = new Set(list);
+      p.inv = p.inv.filter((i) => !gone.has(i));
+    },
+    sort(p) { p.inv.sort((x, y) => y.r - x.r || y.il - x.il || x.id - y.id); },
+    autoEquip(p) { autoEquip(p); },
+    repair(p, b) {
+      const it = S.itemById(p, b.id);
+      if (!it) bad("No such item");
+      repairList(p, [it]);
+    },
+    repairAll(p) { repairList(p, p.inv.filter((i) => i.dur < i.max)); },
+    fuse(p, b) {
+      const slot = b.slot, r = intIn(b.r, 0, 4, "rarity");
+      if (!S.SLOTS.includes(slot)) bad("Invalid slot");
+      const m = p.mines.start, [need, ok] = S.FUSE[r], cost = S.fuseCost(r, m);
+      const pool = p.inv.filter((i) => i.slot === slot && i.r === r && !i.lock && p.eq[slot] !== i.id).slice(0, need);
+      if (pool.length < need) bad("Not enough items to fuse");
+      if (!(p.cash >= cost)) bad("Need $" + cost + " to fuse");
+      p.cash -= cost;
+      const gone = new Set(pool);
+      p.inv = p.inv.filter((i) => !gone.has(i));
+      if (rng() < ok) { p.inv.push(genItem(p, Math.round(pool.reduce((s, i) => s + i.il, 0) / need), slot, r + 1)); evt(p, "🔥 Fused a " + S.RARITIES[r + 1].n + " " + slot + "!"); }
+      else { p.inv.push(pool[Math.floor(rng() * need)]); evt(p, "Fusion failed — one item returned"); }
+    },
+    crate(p, b) {
+      if (!S.SLOTS.includes(b.slot)) bad("Invalid slot");
+      if (p.hero.crates < 1) bad("No crates");
+      p.hero.crates--;
+      giveItem(p, genItem(p, rollItemLevel(p), b.slot, null, p.mines.start.unlockedShaftCount), "from the crate!");
+    },
+    rename(p, b) {
+      const n = cleanName(b.name);
+      if (n.length < 2) bad("Name must be 2-16 letters/numbers");
+      p.name = uniqueName(n, p.id);
+    },
+    claimPrize(p) {
+      if (!over()) bad("Season is still running");
+      if (p.claimed) bad("Already claimed");
+      if (!isPaid(p)) bad("Buy a pack to claim your prize");
+      const rank = board().rank.get(p.id) || 0, prize = prizeFor(rank);
+      p.claimed = true; p.balance += prize;
+      return { paid: prize };
+    },
+  };
+  function repairList(p, list) {
+    if (!list.length) bad("Nothing to repair");
+    const fx = S.computeFx(p), m = p.mines.start, cost = list.reduce((s, i) => s + S.repairCost(i, m, fx), 0);
+    if (!(p.cash >= cost)) bad("Need $" + cost + " to repair");
+    p.cash -= cost;
+    list.forEach((i) => { i.max = Math.max(Math.ceil(S.RARITIES[i.r].dur * 0.5), Math.floor(i.max * 0.95)); i.dur = i.max; });
+  }
+  function act(p, body) {
+    const fn = Object.prototype.hasOwnProperty.call(ACTIONS, body.type) ? ACTIONS[body.type] : null;
+    if (!fn) bad("Unknown action");
+    touchPlayer(p);                       // 1) pay everything earned up to this instant
+    const res = fn(p, body, now()) || {}; // 2) validate + apply the action
+    for (const s of S.SLOTS) { const it = S.itemById(p, p.eq[s]); if (it && it.il > p.hero.lvl) delete p.eq[s]; }
+    p.power = S.heroPower(p);
+    if (!isFinite(p.cash) || p.cash < 0) p.cash = Math.max(0, isFinite(p.cash) ? p.cash : 0);
+    touch(p);
+    return res;
+  }
+
+  // housekeeping: forget abandoned guest accounts (no wallet, no money in, 45 days idle)
+  function prune() {
+    const t = now(), gone = [];
+    for (const p of Object.values(db.players)) {
+      if (!p.wallet && !isPaid(p) && t - p.lastSeen > 45 * DAY && p.balance < 1) gone.push(p.id);
+    }
+    gone.forEach((id) => { delete db.players[id]; dirty.delete(id); });
+    for (const [id, o] of Object.entries(db.orders)) if (t - o.created > 24 * 3600e3) { delete db.orders[id]; touchMeta(); }
+    if (gone.length) { boardCache.v = null; return store.removePlayers(gone); }
+  }
+
+  return {
+    db, C, S, now, saveNow, store, setClock: (ms) => { clockOffset = ms; }, load, flush, touch, touchMeta, metaDirty: () => metaDirty,
+    createPlayer, findByWallet, linkWallet, newSession, authToken, dropSession, uniqueName, cleanName,
+    touchPlayer, settle, tick, view, act, leaderboard, board, mining, grantPack, spendMine, addHistory, evt,
+    isPaid, isActive, over, seasonEnd, prune, ApiError, bad, intIn, rng, ACTIONS, PACKS, SOL,
+  };
+}
+
+module.exports = { createGame, ApiError, bad };

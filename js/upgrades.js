@@ -40,13 +40,11 @@ function fillUpPopup() {
     b.classList.toggle("poor", !r.ok);
   });
 }
-function buyLevels(o) {
+async function buyLevels(o) {
   const { target, idx } = upSel, info = upInfo(target, idx), r = upOption(info, o === "max" ? "max" : +o);
   if (!r.ok) return toast("Not enough cash");
-  state.cash -= r.cost;
-  const mine = activeMine();
-  if (target === "warehouse") mine.warehouse.level += r.n;
-  else if (target === "elevator") mine.elevator.level += r.n;
-  else mine.shafts[idx].level += r.n;
-  saveState(); renderHUD(); refreshFloors(mine, researchMult()); fillUpPopup();
+  const j = await netAct({ type: "upgrade", target, idx, n: o === "max" ? "max" : +o }); // the server prices and applies it
+  if (!j.ok) return toast(j.error);
+  renderHUD(); refreshFloors(activeMine(), researchMult());
+  if (upSel) fillUpPopup();
 }

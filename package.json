@@ -1,8 +1,23 @@
 {
   "name": "idle-miner",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "private": true,
-  "description": "Idle Mountain Miner — multiplayer Season 0",
-  "scripts": { "start": "node server/server.js", "test": "node server/test.js" },
-  "engines": { "node": ">=18" }
+  "description": "Idle Mountain Miner — server-authoritative multiplayer with Solana ($MINE) deposits/withdrawals",
+  "scripts": {
+    "start": "node server/server.js",
+    "test": "node server/test.js",
+    "setup:token": "node scripts/setup-token.js",
+    "calibrate": "node scripts/calibrate.js"
+  },
+  "engines": { "node": ">=18" },
+  "dependencies": {
+    "@solana/spl-token": "~0.4.9",
+    "@solana/web3.js": "~1.98.0",
+    "bs58": "5.0.0",
+    "pg": "^8.13.0",
+    "tweetnacl": "1.0.3"
+  },
+  "overrides": {
+    "@solana/web3.js": "~1.98.0"
+  }
 }

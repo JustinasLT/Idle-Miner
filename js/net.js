@@ -1,54 +1,96 @@
 "use strict";
-// Talks to the multiplayer server. The server owns accounts, the $MINE balance, mining payouts and the leaderboard.
-// Open the game through the server (http://localhost:3000) or add ?api=https://your-server to the URL.
-const API_BASE = (new URLSearchParams(location.search).get("api") || window.IDLE_API || (location.protocol === "file:" ? "http://localhost:3000" : "")).replace(/\/$/, "");
-const AUTH_KEY = "idleMiner_auth_v1";
-const net = { info: null, online: false, error: "", offset: 0, token: null, busy: false };
+// Talks to the game server. The server is the ONLY authority: this file sends intents ("upgrade floor 3")
+// and mirrors the answer into `state`. Same origin only (no ?api= override: that would let a crafted link
+// send your session to someone else's server).
+const AUTH_KEY = "idleMiner_auth_v2";
+const net = { info: null, online: false, error: "", offset: 0, token: null, busy: false, config: null, cashBase: 0, cashRate: 0, cashAt: 0, queue: Promise.resolve(), accountId: null };
 try { net.token = localStorage.getItem(AUTH_KEY); } catch { /* storage blocked */ }
+const setToken = (t) => { net.token = t || null; try { t ? localStorage.setItem(AUTH_KEY, t) : localStorage.removeItem(AUTH_KEY); } catch { /* */ } };
 
 async function api(method, path, body) {
   const h = { "Content-Type": "application/json" };
   if (net.token) h.Authorization = "Bearer " + net.token;
-  const r = await fetch(API_BASE + "/api/" + path, { method, headers: h, body: method === "POST" ? JSON.stringify(body || {}) : undefined });
+  const r = await fetch("/api/" + path, { method, headers: h, body: method === "POST" ? JSON.stringify(body || {}) : undefined, cache: "no-store" });
   const j = await r.json().catch(() => ({}));
-  if (r.status === 401) { net.token = null; try { localStorage.removeItem(AUTH_KEY); } catch { /* */ } }
-  if (!r.ok) throw new Error(j.error || "HTTP " + r.status);
+  if (r.status === 401 && net.token && !/^auth\//.test(path)) { setToken(null); net.info = null; showLogin("Your session ended — please sign in again."); }
+  if (!r.ok) { const e = new Error(j.error || "HTTP " + r.status); e.status = r.status; throw e; }
   return j;
 }
-function applyInfo(j) {
-  if (!j || j.balance == null) return;
+
+// ---- mirror the server's answer into the local state ----------------------------------------------------
+function applyView(j) {
+  if (!j || j.cash == null) return;
+  const firstOfAccount = net.accountId !== j.id;
+  net.accountId = j.id;
   net.info = j; net.online = true; net.error = "";
-  net.offset = j.season.now - Date.now();
+  net.offset = j.serverNow - Date.now();
+  state.cash = j.cash; net.cashBase = j.cash; net.cashRate = j.cashPerSec; net.cashAt = performance.now();
   state.token = j.balance;
-  state.name = j.name;
-  if (j.pages > state.invPages) state.invPages = Math.min(MAX_PAGES, j.pages);
+  state.name = j.name; state.stats.totalEarned = j.totalEarned;
+  const old = state.mines.start, m = j.mine;
+  state.mines.start = {
+    prestigeMult: m.prestigeMult, warehouse: m.warehouse, elevator: m.elevator, unlockedShaftCount: m.unlockedShaftCount, pile: old.pile || { u: 0, v: 0 },
+    shafts: m.shafts.map((s, i) => ({ level: s.level, stock: (old.shafts[i] && old.shafts[i].stock) || 0 })),
+  };
+  state.researchUnlocked = j.researchUnlocked; state.boosts = j.boosts; state.hero = j.hero; state.inv = j.inv; state.eq = j.eq; state.invPages = j.invPages;
+  state.season = { items: j.items }; state.packs = j.packs; state.paid = j.paid; state.guest = j.guest; state.wallet = j.wallet;
+  state.pendingOffline = j.pendingOffline; state.freeMoneyIn = j.freeMoneyIn; state.power = j.power;
+  computeFx();
+  if (firstOfAccount) { resetSims(); buildShafts(); }
+  else if (old.unlockedShaftCount !== m.unlockedShaftCount) buildShafts();
+  if (j.events && j.events.length) toast(j.events.slice(-2).join("  ·  "));
+  invChanged();
+  maybeOfflineModal();
+  renderAccountChip();
 }
+// cash ticks up smoothly between syncs at the rate the server told us; every answer replaces it with the exact value
+function cashTick() { if (net.online) state.cash = net.cashBase + (net.cashRate * (performance.now() - net.cashAt)) / 1000; }
+
 async function netSync() {
-  if (net.busy) return;
+  if (net.busy || !net.token) return;
   net.busy = true;
   try {
-    if (!net.token) {
-      const j = await api("POST", "register", { name: state.name });
-      net.token = j.token; try { localStorage.setItem(AUTH_KEY, j.token); } catch { /* */ }
-    }
     const first = !net.info;
-    const j = await api("POST", "sync", { level: state.hero.lvl, power: heroPower(), items: state.season.items });
-    if (first && state.lastBalance != null && j.balance - state.lastBalance > 0.01 && (Date.now() - state.lastSave) > 60000) {
-      const m = j.balance - state.lastBalance;
-      toast("⛏️ Mined " + formatToken(m) + " $MINE while you were away");
-      const el = $("offline-mine"); if (el) { el.hidden = false; el.textContent = "+" + formatToken(m) + " $MINE mined"; }
-    }
-    applyInfo(j);
-    state.lastBalance = j.balance;
-  } catch (e) { net.online = false; net.error = e.message; }
+    const j = await api("POST", "sync", {});
+    applyView(j);
+    if (first) awayToast(j);
+  } catch (e) { if (e.status !== 401) { net.online = false; net.error = e.message; } }
   net.busy = false;
 }
-// server-priced $MINE purchases: resolves {ok, error?}
-async function netBuy(item, extra) {
-  try { const j = await api("POST", "buy", { item, ...extra }); applyInfo(j); state.lastBalance = state.token; return j; }
-  catch (e) { return { ok: false, error: net.online ? e.message : "Server offline — can't spend $MINE right now" }; }
+// "while you were away" for $MINE (cosmetic): compare with the balance we saw last time on this device
+function awayToast(j) {
+  try {
+    const k = "idleMiner_bal_" + j.id, was = parseFloat(localStorage.getItem(k));
+    if (isFinite(was) && j.balance - was > 0.01) {
+      const m = j.balance - was; toast("⛏️ Mined " + formatToken(m) + " $MINE while you were away");
+      const el = $("offline-mine"); if (el) { el.hidden = false; el.textContent = "+" + formatToken(m) + " $MINE mined"; }
+    }
+  } catch { /* */ }
 }
-async function netRename(name) { const j = await api("POST", "rename", { name }); applyInfo(j); return j; }
-async function netClaim() { const j = await api("POST", "claim", {}); applyInfo(j); return j; }
+const rememberBalance = () => { try { if (net.accountId) localStorage.setItem("idleMiner_bal_" + net.accountId, String(state.token)); } catch { /* */ } };
+
+// one request at a time, in order (so fast tapping can never race itself): resolves {ok, error?, ...view}
+function netAct(body) {
+  const run = async () => {
+    try { const j = await api("POST", "act", body); applyView(j); return j; }
+    catch (e) { return { ok: false, error: e.status ? e.message : "Server unreachable — try again" }; }
+  };
+  net.queue = net.queue.then(run, run);
+  return net.queue;
+}
+async function netPost(path, body) { // bank / pack calls: throws on error
+  const j = await api("POST", path, body);
+  if (j && j.cash != null) applyView(j);
+  return j;
+}
 const netBoard = () => api("GET", "leaderboard");
-function startNet() { netSync(); setInterval(netSync, 15000); }
+const netRename = (name) => netAct({ type: "rename", name });
+const netClaim = () => netAct({ type: "claimPrize" });
+async function netBuy(item) { return netAct({ type: "buy", item }); }
+
+function startNet() {
+  netSync();
+  setInterval(netSync, 15000);
+  setInterval(rememberBalance, 5000);
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) netSync(); });
+}

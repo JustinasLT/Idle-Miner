@@ -1,27 +1,54 @@
-# Idle Mountain Miner — multiplayer
+# Idle Mountain Miner — online edition
 
-## Run it
-Needs Node 18+ (no npm install).
+A server-authoritative idle game. The browser only sends *intents* ("upgrade floor 3"); the server owns every
+number (cash, XP, gear, drops, $MINE) and computes it from **its own clock**. Changing your PC clock or
+sending crafted requests cannot give you anything.
 
-    cd "Idle Miner\files"
-    node server/server.js
+## Run locally
+```
+npm install
+npm test            # 27 server checks (cheats, rate limits, chain analysis, withdrawals...)
+npm start           # http://localhost:3000
+```
 
-Open http://localhost:3000 — the server serves the game and the API. Open it in two browsers to see two players on one leaderboard.
-`node server/test.js` runs the economy self-test.
+## Environment variables
+| Variable | Purpose |
+|---|---|
+| `DATABASE_URL` | **Postgres connection string. Strongly recommended on Render** (free web-service disks are wiped on every deploy/restart). Without it, a file (`server/data.json`) is used. |
+| `SOLANA_CLUSTER` | `testnet` (default) or `devnet`. |
+| `SOLANA_RPC_URL` | Optional custom RPC (public testnet RPC is rate limited). |
+| `MINE_MINT` | Token mint address (from `npm run setup:token`). |
+| `MINE_DECIMALS` | Token decimals (default 6). |
+| `TREASURY_SECRET_KEY` | Treasury wallet secret (base58). Holds the $MINE players deposit and pays withdrawals. **Keep it secret, only in host env vars.** |
+| `MERCHANT_WALLET` | Public address that receives SOL from pack sales (straight to you, not the treasury). |
+| `MINE_PER_SOL` | Price conversion for SOL packs (default 100000 $MINE = 1 SOL). |
+| `KEEPALIVE_URL` | Optional; defaults to `RENDER_EXTERNAL_URL`. The server pings its own `/api/health` every 10 min. |
+| `TRUST_PROXY` | Auto-on on Render (`RENDER=true`); set `0` to disable. |
 
-## Go public
-Deploy the `files` folder to any Node host (Render, Railway, Fly.io, a VPS) with `node server/server.js` as the start command,
-and keep `server/data.json` on a persistent disk (or set DATA_FILE). Behind a proxy set TRUST_PROXY=1.
-If the game is hosted separately from the server, open it with `?api=https://your-server`.
+## Testnet setup
+1. `npm install`
+2. `npm run setup:token` — creates a treasury wallet, the $MINE token (fixed supply, mint authority removed) and prints the env vars. It needs a little test SOL (https://faucet.solana.com, pick *testnet*).
+3. Put the printed values + `MERCHANT_WALLET` into Render → Environment, and add a Render Postgres → `DATABASE_URL`.
+4. In Phantom switch to *Developer Settings → Testnet Mode*, add the token by its mint, send yourself some $MINE from the treasury.
 
-Env: PORT, DATA_FILE, SEASON_START (ISO date, first run only), RATE_LIMIT, TRUST_PROXY, DEV_DAY_OFFSET (testing: skip N days).
+## Fixing "server sleeps when nobody plays"
+Render free web services sleep after ~15 min without traffic. The built-in self-ping cannot wake a sleeping
+server, so also add a free external pinger (UptimeRobot / cron-job.org) hitting
+`https://idle-miner-tu85.onrender.com/api/health` every 5 minutes. Combined with Postgres, nothing is lost on restarts.
 
-## What the server owns
-- Accounts (id + secret in the browser's localStorage — clearing site data loses the account)
-- The $MINE balance. Mining is paid every 5 s to all active players (synced within 3 days), also while offline
-- Prices for every $MINE purchase (pages, boosts, tome, offline x2), the leaderboard, season clock, prize claim
+## Game rules implemented
+- Login: Solana wallet (signed one-time message) or guest. Guests can't withdraw; linking a wallet later keeps the progress (if that wallet already has an account you switch to it).
+- Free tier: everything except withdrawals, earns up to **20,000 $MINE** (about 1–2 h of play), then $MINE earning stops until any pack is bought. Paid tiers are uncapped (original earn rates).
+- Packs (one-time each): Prospector 40k, Foreman 100k, Tycoon 250k $MINE; paying in SOL costs 10% more than $MINE. Free earnings count toward the first pack (e.g. 20k earned + 20k extra).
+- Offline earnings are capped at 8 hours.
+- Bank: deposit/withdraw $MINE. SOL pack purchases go directly to `MERCHANT_WALLET`.
 
-## Anti-cheat — honest limits
-The game simulation still runs in the browser, so the server can only sanity-check what it is told: level can't
-outgrow possible XP, items are rate-limited, power is capped by level/items found. A determined cheater can still
-inflate stats inside those limits. Real protection needs the server to simulate the mines (a larger rewrite).
+## Security notes
+- Web3 code uses only the official `@solana/web3.js`, `@solana/spl-token`, `tweetnacl`, `bs58`.
+- Deposits are credited only after the server reads the confirmed transaction: treasury balance delta **and** the player's own balance loss; each signature can be claimed once (atomic).
+- Withdrawals are signed server-side, recorded before broadcast, refunded exactly once only after the blockhash has expired.
+- Tokens are stored hashed, rate limits per IP/account, strict CSP, 10 KB body limit, static-file whitelist.
+
+## Honest limits
+- Real Solana RPC paths, Postgres and a real wallet on testnet were **not** exercised in the automated tests (a fake chain was used). Test with small amounts on testnet first.
+- Before going to mainnet: independent security audit, rotate the treasury key, keep only a small hot balance in the treasury.
