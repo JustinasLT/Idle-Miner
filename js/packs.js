@@ -1,10 +1,10 @@
 "use strict";
-// Packs panel: three one-time packs, payable in SOL (straight to the game's wallet) or in $MINE (10 % cheaper).
+// Packs panel: three one-time packs (a head start, not a shortcut), payable in SOL (straight to the game's wallet) or in $MINE (10 % cheaper).
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const GEAR_NAMES = { 3: "Epic", 4: "Legendary", 5: "Mythic" };
+const GEAR_NAMES = { 2: "Rare", 3: "Epic", 4: "Legendary", 5: "Mythic" };
 const fmtSol = (x) => (x >= 1 ? x.toFixed(3) : x.toFixed(4)).replace(/0+$/, "").replace(/\.$/, "");
 function ensureWalletAccount() {
-  if (state.guest) { toast("Connect a wallet first (tap the 👤 icon)"); return false; }
+  if (state.guest) { toast("Connect a wallet first (tap the ⚙️ icon)"); return false; }
   return true;
 }
 function renderPacks() {
@@ -22,7 +22,7 @@ function renderPacks() {
     const mineBtn = owned ? "" : `<button type="button" class="pk-btn mine" data-pk="${p.id}" data-how="mine">Pay ${fmtN(p.mine)} $MINE<small>${need > 0 ? "need " + formatToken(need) + " more" : "10% cheaper than SOL"}</small></button>`;
     const solBtn = owned ? "" : `<button type="button" class="pk-btn sol" data-pk="${p.id}" data-how="sol" ${cfg.payEnabled ? "" : "disabled"}>Pay ${fmtSol(p.sol)} SOL<small>${cfg.payEnabled ? "goes straight to the game" : "not set up yet"}</small></button>`;
     return `<div class="pack-card t${p.id}${owned ? " owned" : ""}"><div class="pack-head"><b>${["", "🥉", "🥈", "🥇"][p.id]} ${p.name}</b>${owned ? `<span class="badge">OWNED ✓</span>` : ""}</div>
-      <ul class="pack-perks"><li>🛡️ 8 ${GEAR_NAMES[p.gear]} gear pieces, one per slot (auto-equipped)</li><li>🪙 ${formatMoney(p.cash)} cash</li><li>⭐ +${fmtN(p.xp)} hero XP</li><li>📦 ${p.crates} equipment crates</li><li>💸 Unlocks $MINE withdrawals &amp; endless mining</li></ul>
+      <ul class="pack-perks"><li>🛡️ ${p.pieces} ${GEAR_NAMES[p.gear]} gear pieces (${p.slots.join(", ")}), auto-equipped</li><li>🪙 ${formatMoney(p.cash)} cash</li><li>⭐ +${fmtN(p.xp)} hero XP</li><li>📦 ${p.crates} equipment crate${p.crates === 1 ? "" : "s"}</li><li>💸 Unlocks $MINE withdrawals &amp; endless mining</li></ul>
       ${owned ? "" : `<div class="pack-buy">${mineBtn}${solBtn}</div>`}</div>`;
   }).join("")}<p class="dim small">Each pack can be bought once. Prices are fixed by the server. Network: Solana ${esc(cfg.cluster)}.</p></div>`;
 }

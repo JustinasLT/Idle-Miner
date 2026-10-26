@@ -2,11 +2,10 @@
 // One big Upgrade button everywhere -> popup with +1 / +10 / +50 / MAX
 let upSel = null;
 function upInfo(target, idx = 0) {
-  const mine = activeMine(), rm = researchMult();
-  const infra = rm.upgradeCostMult * infraScale(mine);
+  const mine = activeMine(), infra = costMult() * infraScale(mine);
   if (target === "warehouse") return { name: "Warehouse", level: mine.warehouse.level, base: 25, cm: infra };
   if (target === "elevator") return { name: "Elevator", level: mine.elevator.level, base: 40, cm: infra };
-  return { name: "Floor " + (idx + 1) + " · " + SHAFT_DEFS[idx].name, level: mine.shafts[idx].level, base: 18 * Math.pow(2.3, idx), cm: rm.upgradeCostMult };
+  return { name: "Floor " + (idx + 1) + " · " + SHAFT_DEFS[idx].name, level: mine.shafts[idx].level, base: 18 * Math.pow(2.3, idx), cm: costMult() };
 }
 function maxLevels(info, cash) {
   let n = 0, lv = info.level;
@@ -45,6 +44,6 @@ async function buyLevels(o) {
   if (!r.ok) return toast("Not enough cash");
   const j = await netAct({ type: "upgrade", target, idx, n: o === "max" ? "max" : +o }); // the server prices and applies it
   if (!j.ok) return toast(j.error);
-  renderHUD(); refreshFloors(activeMine(), researchMult());
+  renderHUD(); refreshFloors(activeMine());
   if (upSel) fillUpPopup();
 }

@@ -20,7 +20,7 @@ async function api(method, path, body) {
 // ---- mirror the server's answer into the local state ----------------------------------------------------
 function applyView(j) {
   if (!j || j.cash == null) return;
-  const firstOfAccount = net.accountId !== j.id;
+  const firstOfAccount = net.accountId !== j.id, prevLvl = state.hero.lvl;
   net.accountId = j.id;
   net.info = j; net.online = true; net.error = "";
   net.offset = j.serverNow - Date.now();
@@ -32,16 +32,20 @@ function applyView(j) {
     prestigeMult: m.prestigeMult, warehouse: m.warehouse, elevator: m.elevator, unlockedShaftCount: m.unlockedShaftCount, pile: old.pile || { u: 0, v: 0 },
     shafts: m.shafts.map((s, i) => ({ level: s.level, stock: (old.shafts[i] && old.shafts[i].stock) || 0 })),
   };
-  state.researchUnlocked = j.researchUnlocked; state.boosts = j.boosts; state.hero = j.hero; state.inv = j.inv; state.eq = j.eq; state.invPages = j.invPages;
+  state.boosts = j.boosts; state.hero = j.hero; state.inv = j.inv; state.eq = j.eq; state.invPages = j.invPages;
   state.season = { items: j.items }; state.packs = j.packs; state.paid = j.paid; state.guest = j.guest; state.wallet = j.wallet;
-  state.pendingOffline = j.pendingOffline; state.freeMoneyIn = j.freeMoneyIn; state.power = j.power;
+  state.pendingOffline = j.pendingOffline; state.power = j.power;
+  state.pending = j.pending; state.quests = j.quests; state.social = j.social; state.earnBoost = j.earnBoost; state.offline = j.offline; state.devFaucet = j.devFaucet;
   computeFx();
   if (firstOfAccount) { resetSims(); buildShafts(); }
   else if (old.unlockedShaftCount !== m.unlockedShaftCount) buildShafts();
   if (j.events && j.events.length) toast(j.events.slice(-2).join("  ·  "));
+  if (!firstOfAccount && state.hero.lvl > prevLvl) Sound.play("levelUp");
   invChanged();
   maybeOfflineModal();
   renderAccountChip();
+  renderMineButtons();
+  refreshEarnMenu();
 }
 // cash ticks up smoothly between syncs at the rate the server told us; every answer replaces it with the exact value
 function cashTick() { if (net.online) state.cash = net.cashBase + (net.cashRate * (performance.now() - net.cashAt)) / 1000; }

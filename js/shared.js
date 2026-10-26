@@ -11,23 +11,14 @@
   S.PAGE_SIZE = 48; S.MAX_PAGES = 5; S.PAGE_COST = [0, 300, 800, 2000, 5000]; // $MINE price of backpack page n+1
   S.ITEM_LVL_SPREAD = 10;
   S.DROP_P0 = 0.0002;
-  S.BOOST_MULT = { elev: 3, mine: 2, sell: 2 };
+  S.HERO_MAX = 100;
+  S.XP_PER_SEC = 0.2; // hero XP per second of play (before boosts / gear)
 
   // timings of the animated miners (also define how many ore trips happen per second)
   S.WALK = 1.5; S.SWING_N = 4; S.SWING_T = 0.35; S.DROP = 0.2;
   S.T_MINER = 2 * S.WALK + S.SWING_N * S.SWING_T + S.DROP;
   S.WALK_W = 2.2; S.T_WORKER = 2 * S.WALK_W + 0.3;
 
-  S.RESEARCH_NODES = [
-    { id: "cost10", name: "Efficient Plans", desc: "All upgrade costs −10%", cost: 25e3, effect: { upgradeCostMult: 0.9 } },
-    { id: "elevCap", name: "Heavy Cables", desc: "Elevator capacity +25%", cost: 80e3, effect: { elevatorCapMult: 1.25 } },
-    { id: "idle20", name: "Night Shift", desc: "Offline earnings +20%", cost: 200e3, effect: { offlineMult: 1.2 } },
-    { id: "sell10", name: "Market Access", desc: "Warehouse sell speed +10%", cost: 450e3, effect: { sellMult: 1.1 } },
-    { id: "mine10", name: "Sharper Picks", desc: "Shaft production +10%", cost: 1e6, effect: { mineMult: 1.1 } },
-    { id: "mine20", name: "Power Drills", desc: "Shaft production +20%", cost: 4e6, effect: { mineMult: 1.2 } },
-    { id: "sell20", name: "Express Shipping", desc: "Warehouse sell speed +20%", cost: 12e6, effect: { sellMult: 1.2 } },
-    { id: "cost20", name: "Bulk Discounts", desc: "All upgrade costs −15%", cost: 40e6, effect: { upgradeCostMult: 0.85 } },
-  ];
   S.SLOTS = ["Pickaxe", "Shoes", "Helmet", "Shirt", "Gloves", "Pants", "Amulet", "Ring"];
   S.SLOT_STAT = {
     Pickaxe: ["yield", "Ore Yield", 6], Shoes: ["speed", "Transit Speed", 5], Helmet: ["cap", "Capacity", 5],
@@ -44,9 +35,64 @@
     { n: "Mythic", m: 6.5, aff: 4, dur: 500, c: "#ef5350", w0: 0.02, k: 3 },
   ];
   S.AFFIXES = { drop: ["Drop Rate", 4], xp: ["Hero XP", 8], repair: ["Repair Discount", 5], lucky: ["Lucky Haul (chance x3)", 1] };
-  S.FUSE = [[5, 1], [5, 0.8], [4, 0.6], [4, 0.4], [3, 0.25]];
   const FX0 = () => ({ yield: 0, speed: 0, cap: 0, aura: 0, disc: 0, guard: 0, fort: 0, haste: 0, drop: 0, xp: 0, repair: 0, lucky: 0 });
   S.FX0 = FX0;
+
+  // ---- item upgrades (+1 ... +10) ---------------------------------------------------------
+  // Attempt number n (going from +n to +n+1) succeeds with UP_CHANCE[n]. A failed attempt keeps the item as it is but the
+  // price is gone. The first UP_COIN_ONLY attempts cost coins only, every later one costs coins + $MINE.
+  S.UP_MAX = 10;
+  S.UP_BONUS = 0.10;                                                    // every + adds 10 % of the item's base stats (+100 % at +10)
+  S.UP_CHANCE = [0.95, 0.90, 0.80, 0.65, 0.50, 0.40, 0.30, 0.20, 0.12, 0.07];
+  S.UP_COIN_ONLY = 3;
+  S.UP_MINE = [0, 0, 0, 5, 10, 20, 40, 80, 150, 300];                   // $MINE for a Common item; multiplied by UP_MINE_RARITY
+  S.UP_MINE_RARITY = [1, 1.5, 2, 3, 4, 6];
+  S.upMult = (it) => 1 + S.UP_BONUS * (it.up || 0);
+  S.itemName = (it) => S.RARITIES[it.r].n + " " + it.slot + (it.up ? " +" + it.up : "");
+  S.upgradeInfo = (it, mine) => {
+    const n = it.up || 0;
+    if (n >= S.UP_MAX) return { n, maxed: true };
+    const cash = Math.ceil(40 * Math.pow(2.4, n) * Math.pow(2.5, it.r) * (1 + 0.25 * (it.il - 1)) * S.infraScale(mine));
+    const m = n >= S.UP_COIN_ONLY ? Math.ceil(S.UP_MINE[n] * S.UP_MINE_RARITY[it.r]) : 0;
+    return { n, next: n + 1, chance: S.UP_CHANCE[n], cash, mine: m, maxed: false };
+  };
+
+  // ---- timed boosts (bought with $MINE in the shop) ---------------------------------------
+  S.BOOST_MINUTES = 120;
+  S.BOOST_MAX_MS = 12 * 3600e3;                                         // boosts can be stacked up to 12 h
+  S.BOOST_KEYS = ["xp", "earn", "power"];
+  S.BOOST_FX = { xp: 1, earn: 0.5, power: 1 };                          // +100 % XP, +50 % earnings, +100 % power
+  const boostOn = (st, k, t) => t < ((st.boosts && st.boosts[k]) || 0);
+  S.xpMult = (st, t) => 1 + (boostOn(st, "xp", t) ? S.BOOST_FX.xp : 0);
+  S.powerMult = (st, t) => 1 + (boostOn(st, "power", t) ? S.BOOST_FX.power : 0);
+
+  // ---- quests: Earnings Boost (+10 % each, max +50 %) and Offline Earnings (all five) ------
+  S.QUEST_BOOST = 0.10;
+  S.QUESTS = [
+    { id: "hold", icon: "💎", name: "Hold 50,000 $MINE", desc: "Have at least 50,000 $MINE in your game balance. Dropping below it pauses the reward.", target: 50000 },
+    { id: "deposit", icon: "⬇️", name: "Deposit 50,000 $MINE", desc: "Deposit 50,000 $MINE in total from your wallet (Bank → Deposit).", target: 50000 },
+    { id: "spend", icon: "🔥", name: "Spend 25,000 $MINE", desc: "Spend 25,000 $MINE in total inside the game: packs, boosts, item upgrades, backpack pages.", target: 25000 },
+    { id: "streak", icon: "⏳", name: "24h without withdrawing", desc: "Go 24 hours without a withdrawal. A new withdrawal restarts the clock.", target: 24 * 3600e3 },
+    { id: "social", icon: "🔗", name: "Link X and Discord", desc: "Link your X account and your Discord account.", target: 2 },
+  ];
+  S.questValue = (st, t, id) => {
+    const q = st.q || {};
+    switch (id) {
+      case "hold": return st.balance || 0;
+      case "deposit": return q.deposited || 0;
+      case "spend": return q.spent || 0;
+      case "streak": return Math.max(0, t - Math.max(st.lastWithdrawAt || 0, st.created || 0));
+      case "social": return (q.x ? 1 : 0) + (q.discord ? 1 : 0);
+    }
+    return 0;
+  };
+  S.questStates = (st, t) => S.QUESTS.map((d) => { const v = S.questValue(st, t, d.id); return { id: d.id, value: Math.min(v, d.target), done: v >= d.target }; });
+  S.questsDone = (st, t) => S.questStates(st, t).filter((q) => q.done).length;
+  S.questBoost = (st, t) => Math.round(S.questsDone(st, t) * S.QUEST_BOOST * 100) / 100;
+  S.offlineUnlocked = (st, t) => S.questsDone(st, t) === S.QUESTS.length;
+  // total earnings multiplier (cash and the player's share of the $MINE pool): quests + the shop boost
+  S.earnBoost = (st, t) => S.questBoost(st, t) + (boostOn(st, "earn", t) ? S.BOOST_FX.earn : 0);
+  S.earnMult = (st, t) => 1 + S.earnBoost(st, t);
 
   // ---- infrastructure maths ---------------------------------------------------------
   S.minersFor = (lvl) => Math.min(4, 1 + Math.floor(lvl / 5));
@@ -58,15 +104,15 @@
     for (let i = 0; i < n; i++) total += Math.floor(base * Math.pow(1.12, level + i) * costMult);
     return total;
   };
-  S.shopScale = (mine) => Math.ceil(S.infraScale(mine));
-  S.xpNeed = (lvl) => 60 + 30 * lvl;
+  // Hero level N needs xpNeed(N) XP. All 99 levels together are ~129k XP = ~180 h of play at 0.2 XP/s, i.e. about 15 days at
+  // ~12 h/day with the tab open. XP boosts, gear with Hero XP and packs shorten that a little.
+  S.xpNeed = (lvl) => 55 + 25 * lvl;
 
   // ---- hero / gear ----------------------------------------------------------------
   S.itemById = (st, id) => st.inv.find((i) => i.id === id);
-  S.itemPower = (it) => Math.round((it.v + it.aff.reduce((s, a) => s + a.v, 0)) * 1000 * (it.dur ? 1 : 0.25));
-  S.sellValue = (it) => Math.ceil(35 * Math.pow(3.2, it.r) * (1 + 0.4 * (it.il - 1)) * (0.5 + (0.5 * it.dur) / it.max));
+  S.itemPower = (it) => Math.round((it.v + it.aff.reduce((s, a) => s + a.v, 0)) * S.upMult(it) * 1000 * (it.dur ? 1 : 0.25));
+  S.sellValue = (it) => Math.ceil(35 * Math.pow(3.2, it.r) * (1 + 0.4 * (it.il - 1)) * (0.5 + (0.5 * it.dur) / it.max) * (1 + 0.15 * (it.up || 0)));
   S.repairCost = (it, mine, fx) => Math.ceil((it.max - it.dur) * 0.8 * Math.pow(3, it.r) * S.infraScale(mine) * (1 - fx.repair));
-  S.fuseCost = (r, mine) => Math.ceil(150 * Math.pow(6, r) * S.infraScale(mine));
   S.canEquip = (st, it) => it.il <= st.hero.lvl;
   S.invCap = (st) => st.invPages * S.PAGE_SIZE;
   S.spareItems = (st) => st.inv.filter((i) => st.eq[i.slot] !== i.id);
@@ -76,7 +122,7 @@
     for (const s of S.SLOTS) {
       const it = S.itemById(st, st.eq[s]);
       if (!it) continue;
-      const q = it.dur > 0 ? 1 : 0.25; // broken gear works at 25%
+      const q = (it.dur > 0 ? 1 : 0.25) * S.upMult(it); // broken gear works at 25 %
       f[S.SLOT_STAT[s][0]] += it.v * q;
       it.aff.forEach((a) => (f[a.k] += a.v * q));
     }
@@ -92,30 +138,18 @@
     for (const s of S.SLOTS) { const it = S.itemById(st, st.eq[s]); if (it) p += S.itemPower(it); }
     return Math.round(p);
   };
-  S.researchMult = (st, fx) => {
-    const r = { upgradeCostMult: 1, elevatorCapMult: 1, offlineMult: 1, sellMult: 1, mineMult: 1 };
-    for (const node of S.RESEARCH_NODES) {
-      if (!st.researchUnlocked.includes(node.id)) continue;
-      const e = node.effect;
-      for (const k in e) r[k] *= e[k];
-    }
-    r.upgradeCostMult *= 1 - fx.disc;
-    return r;
-  };
-  S.boostMult = (st, k, t) => (t < (st.boosts[k] || 0) ? S.BOOST_MULT[k] : 1);
 
   // One bundle with everything derived from a state at time t (ms).
-  S.ctx = (st, t) => {
-    const fx = S.computeFx(st), hm = S.heroMult(st, fx), rm = S.researchMult(st, fx);
-    const bm = { mine: S.boostMult(st, "mine", t), elev: S.boostMult(st, "elev", t), sell: S.boostMult(st, "sell", t) };
-    return { st, mine: st.mines.start, fx, hm, rm, bm };
+  S.ctx = (st) => {
+    const fx = S.computeFx(st), hm = S.heroMult(st, fx);
+    return { st, mine: st.mines.start, fx, hm, costMult: 1 - fx.disc };
   };
-  S.floorUnitRate = (i, c) => c.mine.shafts[i].level * 12 * c.rm.mineMult * c.hm.y * c.bm.mine;
-  S.elevatorCapacity = (c) => (c.mine.elevator.level * 100 + 50) * c.rm.elevatorCapMult * c.hm.c;
-  S.elevatorBuff = (c) => c.bm.elev * c.hm.s;
+  S.floorUnitRate = (i, c) => c.mine.shafts[i].level * 12 * c.hm.y;
+  S.elevatorCapacity = (c) => (c.mine.elevator.level * 100 + 50) * c.hm.c;
+  S.elevatorBuff = (c) => c.hm.s;
   S.elevatorTravel = (c) => (1.4 + 0.15 * c.mine.elevator.level) * S.elevatorBuff(c); // floors / s
   S.elevatorStop = (c) => 0.45 / (S.elevatorBuff(c) * (1 + 0.02 * c.mine.elevator.level));
-  S.warehouseSellRate = (c) => c.mine.warehouse.level * 10 * c.rm.sellMult * (1 + c.fx.haste) * c.bm.sell;
+  S.warehouseSellRate = (c) => c.mine.warehouse.level * 10 * (1 + c.fx.haste);
 
   // Elevator simulated cycle by cycle with exactly the rules of the animation (visits floors top-down, loads until full,
   // skips empty boxes, returns when full or at the deepest floor). Returns units/s brought up from each floor.
@@ -145,8 +179,9 @@
     return tStart < 0 || span <= 0 ? P.slice() : got.map((g) => g / span);
   };
 
-  // Cash income per second of the whole mine (miners -> floor boxes -> elevator -> drop pile -> warehouse workers).
-  // scripts/calibrate.js checks this model against the original animated simulation.
+  // Cash income per second of the whole mine (miners -> floor boxes -> elevator -> drop pile -> warehouse workers),
+  // times the earnings boost (quests + shop boost).
+  // scripts/calibrate.js checks the base model against the original animated simulation.
   S.EFFICIENCY = 0.97; // measured: the animation averages ~3% below the model
   S.income = (st, t) => {
     const c = S.ctx(st, t), mine = c.mine, n = mine.unlockedShaftCount, lk = 1 + 2 * c.fx.lucky;
@@ -158,8 +193,9 @@
     for (let i = 0; i < n; i++) { units += E[i]; value += E[i] * S.unitValue(i, mine); mineV += P[i] * S.unitValue(i, mine); }
     const eff = (S.warehouseSellRate(c) * c.hm.c * S.T_WORKER) / ((2 * S.WALK_W) / c.hm.s + 0.3); // units/s the workers can sell
     const flow = units > eff ? eff / units : 1;
-    const perSec = value * flow * (1 + c.fx.fort) * S.EFFICIENCY;
-    return { c, perSec, mineV, units, eff, elevV: value, whV: eff * (units ? value / units : 0) };
+    const base = value * flow * (1 + c.fx.fort) * S.EFFICIENCY;
+    const perSec = base * S.earnMult(st, t);
+    return { c, perSec, base, mineV, units, eff, elevV: value, whV: eff * (units ? value / units : 0) };
   };
   // finished miner trips per second on each unlocked floor (each trip can drop an item)
   S.tripsPerSec = (st, t) => {
@@ -170,10 +206,10 @@
 
   // ---- upgrade info shared by UI and server ------------------------------------------
   S.upInfo = (st, target, idx, t) => {
-    const c = S.ctx(st, t), mine = c.mine, infra = c.rm.upgradeCostMult * S.infraScale(mine);
+    const c = S.ctx(st, t), mine = c.mine, infra = c.costMult * S.infraScale(mine);
     if (target === "warehouse") return { name: "Warehouse", level: mine.warehouse.level, base: 25, cm: infra };
     if (target === "elevator") return { name: "Elevator", level: mine.elevator.level, base: 40, cm: infra };
-    return { name: "Floor " + (idx + 1), level: mine.shafts[idx].level, base: 18 * Math.pow(2.3, idx), cm: c.rm.upgradeCostMult };
+    return { name: "Floor " + (idx + 1), level: mine.shafts[idx].level, base: 18 * Math.pow(2.3, idx), cm: c.costMult };
   };
   S.maxLevels = (info, cash) => {
     let n = 0, lv = info.level;

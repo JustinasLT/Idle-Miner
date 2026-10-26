@@ -1,7 +1,7 @@
 "use strict";
 const bnText = $("bn-text"), elCable = $("elevator-cable"), hfWheel = $("hf-wheel");
 let slowN = 0;
-const BOOST_LABEL = { elev: "⚡ Elevator ×3", mine: "⛏️ Mining ×2", sell: "💰 Market ×2" };
+const BOOST_LABEL = { xp: "📖 XP +100%", earn: "💰 Earnings +50%", power: "⚡ Power +100%" };
 
 function renderHUD() {
   setText($("cash-display"), formatMoney(state.cash));
@@ -16,8 +16,8 @@ function renderHUD() {
   badge.hidden = mine.prestigeMult <= 1;
   setText($("prestige-mult"), mine.prestigeMult);
   const chips = Object.keys(BOOST_LABEL).filter(boostOn).map((k) => {
-    const s = Math.ceil((state.boosts[k] - Date.now()) / 1000);
-    return `<span class="boost-chip">${BOOST_LABEL[k]} ${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}</span>`;
+    const s = Math.ceil((state.boosts[k] - serverNow()) / 1000), h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), x = s % 60;
+    return `<span class="boost-chip">${BOOST_LABEL[k]} ${h ? h + ":" + String(m).padStart(2, "0") : m}:${String(x).padStart(2, "0")}</span>`;
   }).join("");
   const bc = $("boost-chips");
   if (bc._h !== chips) { bc.innerHTML = chips; bc._h = chips; }
@@ -30,13 +30,13 @@ function updateUpgradeCosts() {
     $(id).closest(".btn-upgrade").classList.toggle("poor", state.cash < c);
   });
 }
-function renderGameVisuals(mine, rm) {
+function renderGameVisuals(mine) {
   const e = elevatorSim, top = stopY(e.pos);
   elCar.style.top = top + "px";
   elCable.style.top = WHEEL_Y + "px";
   elCable.style.height = Math.max(0, top - WHEEL_Y) + "px";
   hfWheel.classList.toggle("spin", e.state === "move");
-  elLoad.style.height = Math.min(100, (e.u / elevatorCapacity(mine.elevator.level, rm.elevatorCapMult)) * 100) + "%";
+  elLoad.style.height = Math.min(100, (e.u / elevatorCapacity(mine.elevator.level)) * 100) + "%";
   setText(pileVal, formatMoney(mine.pile.v));
   for (let i = 0; i < mine.unlockedShaftCount; i++) {
     const f = floorUI[i];
@@ -44,31 +44,30 @@ function renderGameVisuals(mine, rm) {
   }
   bnEl.hidden = !bottleneck;
   if (bottleneck) setText(bnText, bottleneck === "elevator" ? "⚠️ Elevator bottleneck — upgrade it!" : "⚠️ Warehouse bottleneck — upgrade it!");
-  elCar.classList.toggle("super-active", boostOn("elev"));
 }
 // slow refresh (4x/sec): labels, costs, miner counts
-function refreshFloors(mine, rm) {
+function refreshFloors(mine) {
   for (let i = 0; i < mine.unlockedShaftCount; i++) {
     const f = floorUI[i], sh = mine.shafts[i];
     if (!f) continue;
     syncMiners(i, mine);
     setText(f.lv, "Lv " + sh.level);
-    setText(f.inc, formatMoney(floorUnitRate(i, mine, rm) * unitValue(i, mine) * 60) + "/min");
-    const c1 = upgradeCost(18 * Math.pow(2.3, i), sh.level, 1, rm.upgradeCostMult);
+    setText(f.inc, formatMoney(floorUnitRate(i, mine) * unitValue(i, mine) * 60) + "/min");
+    const c1 = upgradeCost(18 * Math.pow(2.3, i), sh.level, 1, costMult());
     setText(f.cost, formatMoney(c1));
     f.btn.classList.toggle("poor", state.cash < c1);
   }
   if (floorUI.unlockBtn) floorUI.unlockBtn.classList.toggle("poor", state.cash < shaftUnlockCost(mine.unlockedShaftCount));
 }
 // throughput bars (cash/min) make the bottleneck visible at a glance
-function updateHeroVisuals(mine, rm) {
+function updateHeroVisuals(mine) {
   let U = 0, V = 0;
   const n = mine.unlockedShaftCount;
-  for (let i = 0; i < n; i++) { const u = floorUnitRate(i, mine, rm); U += u; V += u * unitValue(i, mine); }
+  for (let i = 0; i < n; i++) { const u = floorUnitRate(i, mine); U += u; V += u * unitValue(i, mine); }
   const avg = U ? V / U : 0;
-  const cycle = (2 * n) / ((1.4 + 0.15 * mine.elevator.level) * elevatorBuff(mine)) + n * elevatorStop(mine);
-  const vals = [V * 60, (elevatorCapacity(mine.elevator.level, rm.elevatorCapMult) / cycle) * avg * 60,
-    warehouseSellRate(mine.warehouse.level, rm.sellMult) * hmult.c * avg * 60];
+  const cycle = (2 * n) / ((1.4 + 0.15 * mine.elevator.level) * elevatorBuff()) + n * elevatorStop(mine);
+  const vals = [V * 60, (elevatorCapacity(mine.elevator.level) / cycle) * avg * 60,
+    warehouseSellRate(mine.warehouse.level) * hmult.c * avg * 60];
   const mx = Math.max(...vals, 1), lo = Math.min(...vals);
   ["mine", "elev", "wh"].forEach((id, k) => {
     const row = $("tp-" + id);

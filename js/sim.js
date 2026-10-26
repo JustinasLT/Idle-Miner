@@ -14,20 +14,19 @@
 
   function tick(dt) {
     const mine = activeMine();
-    const rm = researchMult();
-    updateMiners(dt, mine, rm);
-    updateElevator(dt, mine, rm);
-    updateWorkers(dt, mine, rm);
+    updateMiners(dt, mine);
+    updateElevator(dt, mine);
+    updateWorkers(dt, mine);
     mineTick(dt); cashTick();
     slowT += dt;
     if (slowT > 0.25) {
       slowT = 0;
       rateMin = net.cashRate * 60;
-      refreshFloors(mine, rm);
-      detectBottleneck(mine, rm);
-      updateHeroVisuals(mine, rm);
+      refreshFloors(mine);
+      detectBottleneck(mine);
+      updateHeroVisuals(mine);
     }
-    renderGameVisuals(mine, rm);
+    renderGameVisuals(mine);
     renderHUD();
   }
 
@@ -89,13 +88,13 @@
   }
 
   // Miner loop: walk to the end of the tunnel -> swing pickaxe -> walk back -> drop ore in the floor box
-  function updateMiners(dt, mine, rm) {
+  function updateMiners(dt, mine) {
     for (let i = 0; i < mine.unlockedShaftCount; i++) {
       const sims = minerSim[i];
       if (!sims || !sims.length) continue;
       const sh = mine.shafts[i];
       const speed = hmult.s;
-      const trip = (floorUnitRate(i, mine, rm) * T_MINER) / sims.length;
+      const trip = (floorUnitRate(i, mine) * T_MINER) / sims.length;
       for (const m of sims) {
         const was = m.s;
         if (m.s === "wait") {
@@ -138,9 +137,9 @@
     e.state = "move";
   }
 
-  function updateElevator(dt, mine, rm) {
+  function updateElevator(dt, mine) {
     const e = elevatorSim, n = mine.unlockedShaftCount;
-    const cap = elevatorCapacity(mine.elevator.level, rm.elevatorCapMult);
+    const cap = elevatorCapacity(mine.elevator.level);
     if (e.state === "idle") {
       e.t -= dt;
       if (e.t <= 0) {
@@ -179,10 +178,10 @@
   }
 
   // Warehouse workers: pick up from the drop pile -> walk to warehouse -> cash is added on arrival
-  function updateWorkers(dt, mine, rm) {
+  function updateWorkers(dt, mine) {
     const wl = mine.warehouse.level, n = Math.min(4, 1 + Math.floor(wl / 5));
     syncWorkers(n);
-    const carry = (warehouseSellRate(wl, rm.sellMult) * T_WORKER * hmult.c) / n;
+    const carry = (warehouseSellRate(wl) * T_WORKER * hmult.c) / n;
     const pile = mine.pile;
     for (const w of workerSim) {
       const was = w.s;
@@ -208,10 +207,10 @@
   }
 
   // A bottleneck = a real jam: floor boxes piling up (elevator) or the drop pile piling up (warehouse)
-  function detectBottleneck(mine, rm) {
+  function detectBottleneck(mine) {
     const boxU = mine.shafts.slice(0, mine.unlockedShaftCount).reduce((s, sh) => s + sh.stock, 0);
-    const rE = boxU / elevatorCapacity(mine.elevator.level, rm.elevatorCapMult);
-    const rW = mine.pile.u / (warehouseSellRate(mine.warehouse.level, rm.sellMult) * T_WORKER);
+    const rE = boxU / elevatorCapacity(mine.elevator.level);
+    const rW = mine.pile.u / (warehouseSellRate(mine.warehouse.level) * T_WORKER);
     const e = rE > (bottleneck === "elevator" ? 1 : 1.5);
     const w = rW > (bottleneck === "warehouse" ? 1.5 : 2.5);
     const prev = bottleneck;

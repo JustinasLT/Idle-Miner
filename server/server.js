@@ -16,7 +16,7 @@ const SEC = { "Content-Security-Policy": CSP, "X-Content-Type-Options": "nosniff
 
 async function createApp(opts = {}) {
   const store = opts.store || await openStore({ file: env.DATA_FILE || path.join(__dirname, "data.json"), databaseUrl: env.DATABASE_URL, ssl: env.DATABASE_SSL === "false" ? false : undefined });
-  const game = createGame({ store, now: opts.now });
+  const game = createGame({ store, now: opts.now, rng: opts.rng });
   await game.load();
   const chain = opts.chain || createChain(SOL);
   const bank = createBank(game, chain);
@@ -54,6 +54,7 @@ async function createApp(opts = {}) {
     "GET /api/health": () => ({ ok: true, now: game.now(), store: store.kind }),
     "GET /api/config": () => ({ ...bank.publicConfig(), nonceTtl: 300 }),
     "GET /api/leaderboard": ({ p }) => game.leaderboard(p),
+    "GET /api/stats": ({ ip }) => { limit("stats:" + ip, 120, 60e3); return game.stats(); },
 
     "POST /api/guest": ({ ip, body }) => {
       limit("guest:" + ip, 20, 3600e3); limit("guest:all", 600, 3600e3);
@@ -89,6 +90,13 @@ async function createApp(opts = {}) {
     },
     "POST /api/logout": ({ p, req }) => { game.dropSession(p, req.headers.authorization); return { ok: true }; },
 
+    "POST /api/account/delete": async ({ p, body }) => {
+      limit("acct:" + p.id, 10, 3600e3);
+      if (body.confirm !== "DELETE") bad("Confirmation missing");
+      await game.deleteAccount(p);
+      return { ok: true };
+    },
+
     "POST /api/sync": ({ p }) => { game.touchPlayer(p); return game.view(p); },
     "GET /api/me": ({ p }) => { game.touchPlayer(p); return game.view(p); },
     "POST /api/act": ({ p, body }) => {
@@ -105,7 +113,7 @@ async function createApp(opts = {}) {
     "POST /api/pack/order": ({ p, body }) => { limit("bank:" + p.id, 30, 60e3); return bank.createPackOrder(p, body.pack); },
     "POST /api/pack/confirm": ({ p, body }) => { limit("bank:" + p.id, 60, 60e3); return bank.confirmPackOrder(p, body.order, body.signature).then((r) => ({ ...r, ...game.view(p) })); },
   };
-  const PUBLIC = new Set(["GET /api/health", "GET /api/config", "GET /api/leaderboard", "POST /api/guest", "POST /api/auth/nonce", "POST /api/auth/wallet"]);
+  const PUBLIC = new Set(["GET /api/health", "GET /api/config", "GET /api/leaderboard", "GET /api/stats", "POST /api/guest", "POST /api/auth/nonce", "POST /api/auth/wallet"]);
 
   // ---- static files (whitelist only: never serve /server, .git, data files...) ------------------------------------
   const VENDOR = [["node_modules", "@solana", "web3.js", "lib", "index.iife.min.js"], ["node_modules", "@solana", "web3.js", "lib", "index.iife.js"]].map((a) => path.join(ROOT, ...a));

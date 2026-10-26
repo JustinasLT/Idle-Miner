@@ -11,36 +11,49 @@ function rollQuality(it, k) { // how good this roll is inside its range, 0-100%
   const v = k ? it.aff.find((a) => a.k === k).v : it.v;
   return Math.max(0, Math.min(100, Math.round(((v / base - 0.9) / 0.2) * 100)));
 }
-function statRows(it, cmp) {
-  const rows = [[SLOT_STAT[it.slot][1], rollQuality(it), it.v, cmp ? cmp.v : 0]];
-  it.aff.forEach((a) => rows.push([AFFIXES[a.k][0], rollQuality(it, a.k), a.v, cmp ? (cmp.aff.find((x) => x.k === a.k) || { v: 0 }).v : 0]));
+function statRows(it, cmp) { // values include the +upgrade bonus
+  const m = Shared.upMult(it), cm = cmp ? Shared.upMult(cmp) : 0;
+  const rows = [[SLOT_STAT[it.slot][1], rollQuality(it), it.v * m, cmp ? cmp.v * cm : 0]];
+  it.aff.forEach((a) => rows.push([AFFIXES[a.k][0], rollQuality(it, a.k), a.v * m, cmp ? ((cmp.aff.find((x) => x.k === a.k) || { v: 0 }).v) * cm : 0]));
   return rows.map(([n, q, v, c]) => {
     const d = cmp ? v - c : 0;
     return `<div class="st-row"><span>${n}</span><i class="chip">${q}%</i><b>+${pct(v)}${cmp && Math.abs(d) > 1e-6 ? ` <em class="${d > 0 ? "up" : "dn"}">${d > 0 ? "▲" : "▼"}${pct(Math.abs(d))}</em>` : ""}</b></div>`;
   }).join("");
 }
-const tile = (it, cls = "") => `<button type="button" class="bp-cell r${it.r} ${canEquip(it) ? "" : "locked-lvl"} ${cls}" style="--rc:${RARITIES[it.r].c}" data-act="pick" data-id="${it.id}"><i>${SLOT_ICON[it.slot]}</i><b>Lv${it.il}</b>${it.lock ? "<u>🔒</u>" : ""}${it.dur ? "" : "<s>!</s>"}</button>`;
+const tile = (it, cls = "") => `<button type="button" class="bp-cell r${it.r} ${canEquip(it) ? "" : "locked-lvl"} ${cls}" style="--rc:${RARITIES[it.r].c}" data-act="pick" data-id="${it.id}"><i>${SLOT_ICON[it.slot]}</i><b>Lv${it.il}</b>${it.up ? `<em>+${it.up}</em>` : ""}${it.lock ? "<u>🔒</u>" : ""}${it.dur ? "" : "<s>!</s>"}</button>`;
 const durBar = (it) => `<div class="dur-line"><i class="dur"><u style="width:${(it.dur / it.max) * 100}%"></u></i><small>${it.dur}/${it.max}${it.dur ? "" : " BROKEN"}</small></div>`;
 
+// "Upgrade +n -> +n+1": success chance, price (coins, and $MINE from +4), and the whole chance curve at a glance
+function upgradeBox(it) {
+  const inf = Shared.upgradeInfo(it, activeMine());
+  if (inf.maxed) return `<div class="up-box maxed"><b>✨ Maxed out: +${UP_MAX}</b></div>`;
+  const chance = Math.round(inf.chance * 100), canCash = state.cash >= inf.cash, canMine = !inf.mine || state.token >= inf.mine;
+  const curve = Shared.UP_CHANCE.map((c, i) => `<i class="${i < inf.n ? "done" : i === inf.n ? "next" : ""}" style="height:${Math.max(8, c * 100)}%" title="+${i} → +${i + 1}: ${Math.round(c * 100)}%"><u>${i + 1}</u></i>`).join("");
+  return `<div class="up-box"><div class="up-head"><b>⬆ Upgrade +${inf.n} → +${inf.next}</b><span class="chip ${chance >= 70 ? "hi" : chance >= 35 ? "mid" : "lo"}">${chance}% success</span></div>
+    <div class="up-curve" title="Success chance of every upgrade step">${curve}</div>
+    <div class="up-cost"><span class="${canCash ? "" : "bad"}">🪙 ${formatMoney(inf.cash)}</span>${inf.mine ? `<span class="tokc ${canMine ? "" : "bad"}">◈ ${formatToken(inf.mine)} $MINE</span>` : `<span class="dim">no $MINE needed</span>`}</div>
+    <button type="button" class="inv-btn gold" data-act="upgrade" data-id="${it.id}">⬆ Upgrade to +${inf.next}</button>
+    <small class="dim">+1 adds ${pct(Shared.UP_BONUS)} of the item's base stats. A failed attempt keeps the item at +${inf.n}, but the price is spent.</small></div>`;
+}
 function equippedStrip() {
   const s = INV.selSlot && state.eq[INV.selSlot] ? INV.selSlot : SLOTS.find((x) => state.eq[x]);
   const it = s && itemById(state.eq[s]);
   if (!it) return `<div class="eq-card empty">Nothing equipped yet — tap an item below and press Equip.</div>`;
   const R = RARITIES[it.r];
   return `<div class="eq-card" style="--rc:${R.c}"><div class="eq-ico"><i>${SLOT_ICON[it.slot]}</i></div>
-    <div class="eq-main"><b class="nm">${R.n} ${it.slot}</b><div class="eq-st"><span>Power <b>${itemPower(it)}</b></span><span>${SLOT_STAT[it.slot][1]} <b>+${pct(it.v)}</b></span><span>Lvl <b>${it.il}</b></span></div>${durBar(it)}</div>
-    <div class="eq-btns"><button type="button" class="inv-btn" data-act="unequip" data-slot="${it.slot}">Unequip</button>${it.dur < it.max ? `<button type="button" class="inv-btn" data-act="repair" data-id="${it.id}">🔧 ${formatMoney(repairCost(it, activeMine()))}</button>` : ""}</div></div>`;
+    <div class="eq-main"><b class="nm">${itemName(it)}</b><div class="eq-st"><span>Power <b>${itemPower(it)}</b></span><span>${SLOT_STAT[it.slot][1]} <b>+${pct(it.v * Shared.upMult(it))}</b></span><span>Lvl <b>${it.il}</b></span></div>${durBar(it)}</div>
+    <div class="eq-btns"><button type="button" class="inv-btn" data-act="unequip" data-slot="${it.slot}">Unequip</button>${it.dur < it.max ? `<button type="button" class="inv-btn" data-act="repair" data-id="${it.id}">🔧 ${formatMoney(repairCost(it, activeMine()))}</button>` : ""}</div>${upgradeBox(it)}</div>`;
 }
 function detailPanel() {
   const it = INV.selItem && itemById(INV.selItem);
   if (!it || state.eq[it.slot] === it.id) return `<div class="item-detail empty">Tap an item in your backpack to inspect it.</div>`;
   const R = RARITIES[it.r], cmp = itemById(state.eq[it.slot]), mine = activeMine();
   return `<div class="item-detail" style="--rc:${R.c}">
-    <div class="d-head"><div class="eq-ico"><i>${SLOT_ICON[it.slot]}</i></div><div><b class="nm">${R.n} ${it.slot}</b><small>${R.n.toUpperCase()} · ${it.slot.toUpperCase()} · LVL ${it.il}${canEquip(it) ? "" : " · 🚫 TOO HIGH"}${it.lock ? " · 🔒 LOCKED" : ""}</small></div></div>
-    <div class="d-power">⚔ Power ${itemPower(it)}</div>
+    <div class="d-head"><div class="eq-ico"><i>${SLOT_ICON[it.slot]}</i></div><div><b class="nm">${itemName(it)}</b><small>${R.n.toUpperCase()} · ${it.slot.toUpperCase()} · LVL ${it.il}${canEquip(it) ? "" : " · 🚫 TOO HIGH"}${it.lock ? " · 🔒 LOCKED" : ""}</small></div></div>
+    <div class="d-power">⚔ Power ${itemPower(it)}${it.up ? ` <small>(+${it.up} upgrade)</small>` : ""}</div>
     <div class="st-list">${statRows(it, cmp)}</div>
-    ${cmp ? `<p class="cmp">Compared with equipped: <b>${RARITIES[cmp.r].n} ${cmp.slot}</b> (Power ${itemPower(cmp)})</p>` : `<p class="cmp">Slot is empty — equipping adds the full bonus.</p>`}
-    <p class="flavor">"${FLAVOR[it.id % FLAVOR.length]}"</p>${durBar(it)}
+    ${cmp ? `<p class="cmp">Compared with equipped: <b>${itemName(cmp)}</b> (Power ${itemPower(cmp)})</p>` : `<p class="cmp">Slot is empty — equipping adds the full bonus.</p>`}
+    <p class="flavor">"${FLAVOR[it.id % FLAVOR.length]}"</p>${durBar(it)}${upgradeBox(it)}
     <div class="d-btns">${canEquip(it) ? `<button type="button" class="inv-btn gold" data-act="equip" data-id="${it.id}">Equip</button>` : `<button type="button" class="inv-btn gold" disabled>Requires hero Lv ${it.il}</button>`}
       <button type="button" class="inv-btn" data-act="lock" data-id="${it.id}">${it.lock ? "🔓 Unlock" : "🔒 Lock"}</button>
       ${it.dur < it.max ? `<button type="button" class="inv-btn" data-act="repair" data-id="${it.id}">🔧 ${formatMoney(repairCost(it, mine))}</button>` : ""}
@@ -81,17 +94,18 @@ function stakeCard() { // your share of the global power and the $MINE it earns 
   return `<div class="inv-card stake"><h3>⚡ Mining stake · Season 0</h3>
     <div class="stake-big"><b>${share < 0.01 ? "<0.01" : share.toFixed(share >= 10 ? 1 : 2)}%</b><span>of global power</span></div>
     <i class="dur"><u style="width:${Math.min(100, Math.max(1, share))}%"></u></i>
-    <div class="st-row"><span>Your hero power</span><b>${fmtN(m.my)}</b></div>
+    <div class="st-row"><span>Your hero power</span><b>${fmtN(m.my)}${m.powerMult > 1 ? ` <em class="up">×${m.powerMult} boost → ${fmtN(m.my * m.powerMult)}</em>` : ""}</b></div>
+    <div class="st-row"><span>Earnings boost</span><b>+${Math.round(state.earnBoost.total * 100)}%</b></div>
     <div class="st-row"><span>Global power (${m.players} active players)</span><b>${fmtN(m.global)}</b></div>
     <div class="st-row"><span>Predicted $MINE / day</span><b class="tokc">◈ ${formatToken(m.free ? 0 : m.onboarding ? m.perSec * 86400 : m.perDay)}</b></div>
     <div class="st-row"><span>Predicted $MINE / hour</span><b class="tokc">◈ ${formatToken(m.free ? 0 : m.onboarding ? m.perSec * 3600 : m.perDay / 24)}</b></div>
     <div class="st-row"><span>Mined this season</span><b class="tokc">◈ ${formatToken(earned)}</b></div>
-    <p class="dim small">${net.online ? "" : "⚠ Server offline — showing last known numbers. "}${note} Stronger gear and a higher level raise your share. Prediction uses today's power; others grow too.</p></div>`;
+    <p class="dim small">${net.online ? "" : "⚠ Server offline — showing last known numbers. "}${note} Stronger gear, upgrades, a higher level and your earnings boost raise your share. Prediction uses today's power; others grow too.</p></div>`;
 }
 function heroTab() {
-  const h = state.hero, need = 60 + 30 * h.lvl;
+  const h = state.hero, need = Shared.xpNeed(h.lvl);
   const rows = STAT_LABELS.filter(([k]) => fx[k] > 0).map(([k, n]) => `<div class="st-row"><span>${n}</span><b>+${pct(fx[k])}</b></div>`).join("") || `<p class="dim">Equip gear to gain bonuses.</p>`;
-  return `<div class="inv-card hero-card"><div class="hero-av">🤠</div><div><b class="nm">Hero · Level ${h.lvl}</b><i class="dur xp"><u style="width:${Math.min(100, (h.xp / need) * 100)}%"></u></i><small class="dim">${Math.floor(h.xp)}/${need} XP</small></div></div>
+  return `<div class="inv-card hero-card"><div class="hero-av">🤠</div><div><b class="nm">Hero · Level ${h.lvl}</b><i class="dur xp"><u style="width:${Math.min(100, (h.xp / need) * 100)}%"></u></i><small class="dim">${h.lvl >= Shared.HERO_MAX ? "MAX LEVEL" : Math.floor(h.xp) + "/" + need + " XP"}</small></div></div>
     ${stakeCard()}
     <div class="inv-card"><h3>Active everywhere</h3><p class="dim">The hero now boosts every floor, the elevator and the warehouse at once.</p>
     <div class="st-row"><span>Ore production</span><b>×${hmult.y.toFixed(2)}</b></div><div class="st-row"><span>Movement speed</span><b>×${hmult.s.toFixed(2)}</b></div><div class="st-row"><span>Carry capacity</span><b>×${hmult.c.toFixed(2)}</b></div></div>
@@ -99,18 +113,14 @@ function heroTab() {
     <div class="inv-card"><h3>Loot luck</h3><div class="st-row"><span>Item level range</span><b>${Math.max(1, h.lvl - ITEM_LVL_SPREAD)} – ${h.lvl + ITEM_LVL_SPREAD}</b></div><div class="st-row"><span>Drops today</span><b>${h.n}</b></div><div class="st-row"><span>Epic pity</span><b>${h.pE}/50</b></div><div class="st-row"><span>Legendary pity</span><b>${h.pL}/500</b></div></div>`;
 }
 function craftTab() {
-  const h = state.hero, mine = activeMine(), spare = spareItems(), fuses = [];
-  SLOTS.forEach((s) => RARITIES.slice(0, 5).forEach((R, r) => {
-    if (spare.filter((i) => i.slot === s && i.r === r && !i.lock).length >= FUSE[r][0])
-      fuses.push(`<button type="button" class="inv-btn" data-act="fuse" data-slot="${s}" data-r="${r}">${SLOT_ICON[s]} ${FUSE[r][0]}× ${R.n} → ${RARITIES[r + 1].n} (${pct(FUSE[r][1])}) · ${formatMoney(fuseCost(r, mine))}</button>`);
-  }));
+  const h = state.hero, mine = activeMine();
   const dmg = state.inv.filter((i) => i.dur < i.max);
-  return `<div class="inv-card"><h3>📦 Equipment crates (${h.crates})</h3>${h.crates ? `<p class="dim">Pick a slot to open one:</p><div class="btn-wrap">${SLOTS.map((s) => `<button type="button" class="inv-btn" data-act="crate" data-slot="${s}">${SLOT_ICON[s]}</button>`).join("")}</div>` : `<p class="dim">Crates drop from the shafts or can be bought in the Shop.</p>`}</div>
-    <div class="inv-card"><h3>🔥 Forge</h3><div class="btn-wrap col">${fuses.join("") || `<p class="dim">Collect same-slot, same-rarity spares to fuse them up a tier.</p>`}</div></div>
-    <div class="inv-card"><h3>🔧 Workshop</h3><button type="button" class="inv-btn gold" data-act="repairall" ${dmg.length ? "" : "disabled"}>Repair all${dmg.length ? " · " + formatMoney(dmg.reduce((s, i) => s + repairCost(i, mine), 0)) : ""}</button></div>`;
+  return `<div class="inv-card"><h3>📦 Equipment crates (${h.crates})</h3>${h.crates ? `<p class="dim">Pick a slot to open one:</p><div class="btn-wrap">${SLOTS.map((s) => `<button type="button" class="inv-btn" data-act="crate" data-slot="${s}">${SLOT_ICON[s]}</button>`).join("")}</div>` : `<p class="dim">Crates are found while mining (pick them up with “Claim mining rewards” on the mine screen) and come with packs.</p>`}</div>
+    <div class="inv-card"><h3>🔧 Workshop</h3><button type="button" class="inv-btn gold" data-act="repairall" ${dmg.length ? "" : "disabled"}>Repair all${dmg.length ? " · " + formatMoney(dmg.reduce((s, i) => s + repairCost(i, mine), 0)) : ""}</button></div>
+    <div class="inv-card"><h3>⬆ Item upgrades</h3><p class="dim">Select any item (equipped or in your backpack) on the ITEMS tab to upgrade it up to +${UP_MAX}. The first ${Shared.UP_COIN_ONLY} upgrades cost coins, the rest coins + $MINE. Each step is a gamble — the higher the level, the lower the chance.</p></div>`;
 }
 function renderHero() {
-  const tabs = [["items", "ITEMS"], ["hero", "HERO"], ["craft", "CRAFT"]].map(([t, n]) => `<button type="button" class="inv-tab${INV.tab === t ? " on" : ""}" data-act="tab" data-tab="${t}">${n}</button>`).join("");
+  const tabs = [["items", "ITEMS"], ["hero", "HERO"], ["craft", "WORKSHOP"]].map(([t, n]) => `<button type="button" class="inv-tab${INV.tab === t ? " on" : ""}" data-act="tab" data-tab="${t}">${n}</button>`).join("");
   $("hero-content").innerHTML = `<div class="inv"><div class="inv-top"><span class="inv-title">◆ INVENTORY</span><nav>${tabs}</nav></div>${INV.tab === "items" ? itemsTab() : INV.tab === "hero" ? heroTab() : craftTab()}</div>`;
 }
 async function heroClick(e) {
@@ -127,17 +137,25 @@ async function heroClick(e) {
   if (a === "equip") { if (!canEquip(it)) return toast("Hero must be level " + it.il + " to equip this"); return send({ type: "equip", id: it.id }, () => { INV.selSlot = it.slot; INV.selItem = null; }); }
   if (a === "unequip") return send({ type: "unequip", slot: d.slot });
   if (a === "lock") return send({ type: "lock", id: it.id });
-  if (a === "sell") { if (it.lock) return; return send({ type: "sell", id: it.id }, () => { INV.selItem = null; }); }
+  if (a === "sell") {
+    if (it.lock) return;
+    const doSell = () => send({ type: "sell", id: it.id }, () => { INV.selItem = null; });
+    return it.up ? confirmModal("Sell " + itemName(it) + "?", `This item is upgraded to +${it.up}. Selling it gives ${formatMoney(sellValue(it))} — the upgrade cost is lost.`, "Sell", doSell) : doSell();
+  }
+  if (a === "upgrade") {
+    return send({ type: "upgradeItem", id: it.id }, (r) => {
+      if (r.upgrade.ok) { Sound.play("upgradeOk"); toast("✅ Success! " + r.upgrade.name); } else { Sound.play("upgradeFail"); toast("💥 Upgrade failed — " + r.upgrade.name + " is unchanged"); }
+    });
+  }
   if (a === "sellall") {
-    const list = spareItems().filter((i) => !i.lock && i.r <= 2);
-    if (!list.length) return toast("Nothing to sell — Epic+ and locked items are kept");
-    return confirmModal("Sell all?", `Sell ${list.length} unlocked item(s) up to Rare for ${formatMoney(list.reduce((s, i) => s + sellValue(i), 0))}? Epic and better are kept.`, "Sell", () => send({ type: "sellAll" }));
+    const list = spareItems().filter((i) => !i.lock && !i.up && i.r <= 2);
+    if (!list.length) return toast("Nothing to sell — Epic+, upgraded and locked items are kept");
+    return confirmModal("Sell all?", `Sell ${list.length} unlocked item(s) up to Rare for ${formatMoney(list.reduce((s, i) => s + sellValue(i), 0))}? Epic and better, and upgraded items, are kept.`, "Sell", () => send({ type: "sellAll" }));
   }
   if (a === "sort") return send({ type: "sort" });
   if (a === "auto") return send({ type: "autoEquip" });
   if (a === "repair") return send({ type: "repair", id: it.id });
   if (a === "repairall") return send({ type: "repairAll" });
-  if (a === "fuse") return send({ type: "fuse", slot: d.slot, r: +d.r });
   if (a === "crate") return send({ type: "crate", slot: d.slot });
   if (a === "buypage") {
     if (state.invPages >= MAX_PAGES) return;

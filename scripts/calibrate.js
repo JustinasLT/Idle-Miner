@@ -7,7 +7,7 @@ function mkState(n, lvl, elev, wh, extra = {}) {
   const shafts = Array.from({ length: 30 }, () => ({ level: 1 }));
   for (let i = 0; i < n; i++) shafts[i].level = lvl;
   return { mines: { start: { prestigeMult: 1, warehouse: { level: wh }, elevator: { level: elev }, shafts, unlockedShaftCount: n } },
-    researchUnlocked: [], boosts: { elev: 0, mine: 0, sell: 0 }, hero: { lvl: 1 }, inv: [], eq: {}, ...extra };
+    boosts: { xp: 0, earn: 0, power: 0 }, hero: { lvl: 1 }, inv: [], eq: {}, ...extra };
 }
 function simulate(st, seconds) {
   const c = S.ctx(st, 0), mine = c.mine, n = mine.unlockedShaftCount, dt = 0.02;

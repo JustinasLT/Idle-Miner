@@ -22,7 +22,7 @@ let shaftsBuilt = false;
     sc.scrollTop = keep;
     document.getElementById("shaft-core").style.height = un * L.floor + "px";
     for (let i = 0; i < un; i++) syncMiners(i, mine);
-    refreshFloors(mine, researchMult());
+    refreshFloors(mine);
     shaftsBuilt = true;
   }
 

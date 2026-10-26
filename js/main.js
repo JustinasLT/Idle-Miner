@@ -1,6 +1,6 @@
 "use strict";
 let lastTick = performance.now();
-const PANELS = { hero: () => renderHero(), ranks: () => renderRanks(), packs: () => renderPacks(), bank: () => renderBank(), shop: () => renderShop(), research: () => renderResearch() };
+const PANELS = { hero: () => renderHero(), ranks: () => renderRanks(), packs: () => renderPacks(), bank: () => renderBank(), shop: () => renderShop() };
 function setupNav() {
   document.querySelectorAll(".nav-btn").forEach((btn) => btn.addEventListener("click", () => {
     document.querySelectorAll(".nav-btn").forEach((b) => b.classList.remove("active"));
@@ -25,7 +25,7 @@ function setupPrestige() {
     $("prestige-modal").classList.add("hidden");
     const r = await netAct({ type: "prestige" });
     if (!r.ok) return toast(r.error);
-    resetSims(); buildShafts(); renderHUD(); toast("Prestiged! Earnings ×" + activeMine().prestigeMult + " 🌟");
+    resetSims(); buildShafts(); renderHUD(); Sound.play("levelUp"); toast("Prestiged! Earnings ×" + activeMine().prestigeMult + " 🌟");
   };
   $("prestige-badge").addEventListener("dblclick", open);
   $("cash-display").addEventListener("dblclick", open);
@@ -45,12 +45,11 @@ function init() {
   $("hero-content").addEventListener("click", heroClick);
   $("dyn-modal").addEventListener("click", (e) => { if (e.target.id === "dyn-modal") closeModal(); });
   buildShafts();
-  setupNav(); setupPrestige(); setupRanks(); setupLogin(); setupPacks(); setupBank();
+  setupNav(); setupPrestige(); setupRanks(); setupLogin(); setupPacks(); setupBank(); setupEarn(); Sound.init();
   document.querySelectorAll("[data-upgrade]").forEach((b) => (b.onclick = () => openUpgrade(b.dataset.upgrade)));
   $("scroll-up").onclick = () => $("world-scroll").scrollBy({ top: -240, behavior: "smooth" });
   $("scroll-down").onclick = () => $("world-scroll").scrollBy({ top: 240, behavior: "smooth" });
-  $("btn-claim-offline").onclick = () => claimOffline(false);
-  $("btn-double-offline").onclick = () => claimOffline(true);
+  $("btn-claim-offline").onclick = claimOffline;
   renderHUD();
   requestAnimationFrame(loop);
   bootSession();   // sign in with a saved session, or show the login screen

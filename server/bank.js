@@ -6,7 +6,7 @@
 //  * Withdrawals are deducted + stored durably BEFORE anything is signed; the signed transaction (and so its signature)
 //    is stored BEFORE it is broadcast, so a crash can never lead to paying twice or losing the balance.
 const crypto = require("crypto");
-const { SOL, PACKS, C } = require("./config.js");
+const { SOL, PACKS, C, PRICES } = require("./config.js");
 
 const SIG_RE = /^[1-9A-HJ-NP-Za-km-z]{64,90}$/;
 const DAY = 864e5;
@@ -36,19 +36,18 @@ function createBank(game, chain) {
     return {
       cluster: SOL.cluster, decimals: dec, mint: chain.mint || SOL.mint || "", treasury: chain.treasury || "", merchant: chain.merchant || "",
       tokenEnabled: !!chain.tokenEnabled, payEnabled: !!chain.payEnabled, mineDiscount: SOL.mineDiscount,
-      minDeposit: SOL.minDeposit, minWithdraw: SOL.minWithdraw, maxWithdrawDay: SOL.maxWithdrawDay,
-      freeCap: C.FREE_EARN_CAP,
-      packs: PACKS.map((p) => ({ id: p.id, name: p.name, mine: p.mine, lamports: p.lamports, sol: p.lamports / 1e9, blurb: p.blurb, cash: p.cash, xp: p.xp, crates: p.crates, gear: p.gearRarity })),
+      minDeposit: SOL.minDeposit, minWithdraw: SOL.minWithdraw, maxWithdraw: SOL.maxWithdraw, withdrawFee: SOL.withdrawFee, withdrawCooldownMs: SOL.withdrawCooldownMs,
+      freeCap: C.FREE_EARN_CAP, devFaucet: C.DEV_FAUCET, devMine: C.DEV_MINE_AMOUNT, prices: PRICES,
+      packs: PACKS.map((p) => ({ id: p.id, name: p.name, mine: p.mine, lamports: p.lamports, sol: p.lamports / 1e9, blurb: p.blurb, cash: p.cash, xp: p.xp, crates: p.crates, gear: p.gearRarity, pieces: p.slots.length, slots: p.slots })),
     };
   }
   function bankView(p) {
     const t = game.now();
     const withdrawals = Object.values(db.withdrawals).filter((w) => w.pid === p.id).sort((a, b) => b.created - a.created).slice(0, 15)
-      .map((w) => ({ id: w.id, amount: w.amount, state: w.state, sig: w.sig || null, created: w.created, error: w.error || null }));
-    const used = p.withdrawLog.filter((x) => t - x.t < DAY).reduce((s, x) => s + x.amount, 0);
+      .map((w) => ({ id: w.id, amount: w.amount, fee: w.fee, net: w.net == null ? w.amount : w.net, state: w.state, sig: w.sig || null, created: w.created, error: w.error || null }));
     return {
       wallet: p.wallet, balance: p.balance, canWithdraw: !!p.wallet && game.isPaid(p),
-      withdrawnToday: used, withdrawLeft: Math.max(0, SOL.maxWithdrawDay - used),
+      cooldownLeft: Math.max(0, (p.lastWithdrawAt || 0) + SOL.withdrawCooldownMs - t),
       deposits: p.history.filter((h) => h.type === "deposit").slice(0, 15), withdrawals,
     };
   }
@@ -75,11 +74,11 @@ function createBank(game, chain) {
         if (r.status === "pending") return { status: "pending" };
         if (r.status === "error") bad(r.error);
         const credit = chain.fromBase(r.baseUnits);
-        p.balance += credit;
+        p.balance += credit; p.q.deposited += credit; // deposits count towards the "Deposit 50,000 $MINE" quest
         game.addHistory(p, { type: "deposit", amount: credit, sig });
         game.touch(p);
         const ok = await game.saveNow([p], { sig, info: { pid: p.id, kind: "deposit", amount: credit, at: Date.now() } });
-        if (!ok) { p.balance -= credit; p.history.shift(); bad("This transaction was already credited"); }
+        if (!ok) { p.balance -= credit; p.q.deposited -= credit; p.history.shift(); bad("This transaction was already credited"); }
         return { status: "ok", credited: credit };
       } finally { inflight.delete(sig); }
     });
@@ -87,31 +86,35 @@ function createBank(game, chain) {
   const db_hasSig = (sig) => game.store.hasSig(sig);
 
   // ---- withdrawals -------------------------------------------------------------------------------------------
+  // The player asks for `amt` $MINE to leave the game balance. SOL.withdrawFee (20 %) of it stays with the game,
+  // the rest is sent to the player's own wallet. Max SOL.maxWithdraw per request, one request per 24 h.
   function requestWithdraw(p, amount) {
     return locked(p, async () => {
       needToken(); needWallet(p);
       if (!game.isPaid(p)) bad("Buy a pack to unlock withdrawals");
       const base = tokens(amount), amt = base / unit, t = game.now();
       if (amt < SOL.minWithdraw) bad("Minimum withdrawal is " + SOL.minWithdraw + " $MINE");
-      if (t - p.lastWithdrawAt < SOL.withdrawCooldownMs) bad("Please wait a few seconds between withdrawals", 429);
-      p.withdrawLog = p.withdrawLog.filter((x) => t - x.t < DAY);
-      const used = p.withdrawLog.reduce((s, x) => s + x.amount, 0);
-      if (used + amt > SOL.maxWithdrawDay) bad("Daily withdrawal limit is " + SOL.maxWithdrawDay + " $MINE (" + Math.max(0, SOL.maxWithdrawDay - used).toFixed(2) + " left)");
+      if (amt > SOL.maxWithdraw) bad("Maximum per withdrawal is " + SOL.maxWithdraw + " $MINE");
+      const left = (p.lastWithdrawAt || 0) + SOL.withdrawCooldownMs - t;
+      if (left > 0) bad("Withdrawals have a 24 hour cooldown — next one in " + Math.floor(left / 3600e3) + "h " + String(Math.ceil((left % 3600e3) / 60e3)).padStart(2, "0") + "m", 429);
       game.touchPlayer(p);
       if (p.balance < amt) bad("Not enough $MINE");
+      const feeBase = Math.floor(base * SOL.withdrawFee + 1e-6), netBase = base - feeBase;
+      if (netBase < 1) bad("Amount is too small");
       const treasury = await chain.treasuryBalance();
-      if (treasury < BigInt(base)) bad("The game treasury is temporarily out of $MINE — try a smaller amount later", 503);
+      if (treasury < BigInt(netBase)) bad("The game treasury is temporarily out of $MINE — try a smaller amount later", 503);
       // --- everything below is synchronous: no other request can interleave ---
       if (p.balance < amt) bad("Not enough $MINE");
+      if ((p.lastWithdrawAt || 0) + SOL.withdrawCooldownMs - game.now() > 0) bad("Withdrawals have a 24 hour cooldown", 429);
+      const prevAt = p.lastWithdrawAt || 0;
       p.balance -= amt;
       p.lastWithdrawAt = t;
-      p.withdrawLog.push({ t, amount: amt });
-      const w = { id: crypto.randomBytes(8).toString("hex"), pid: p.id, wallet: p.wallet, amount: amt, base: String(base), state: "queued", created: t, tries: 0 };
+      const w = { id: crypto.randomBytes(8).toString("hex"), pid: p.id, wallet: p.wallet, amount: amt, fee: feeBase / unit, net: netBase / unit, base: String(netBase), state: "queued", created: t, prevAt, tries: 0 };
       db.withdrawals[w.id] = w;
       game.touch(p); game.touchMeta();
       await game.saveNow([p]);           // durable BEFORE any chain activity
       kick();
-      return { withdrawalId: w.id, amount: amt, state: w.state };
+      return { withdrawalId: w.id, amount: amt, fee: w.fee, net: w.net, state: w.state };
     });
   }
 
@@ -121,8 +124,7 @@ function createBank(game, chain) {
     const p = db.players[w.pid];
     if (p) {
       p.balance += w.amount;
-      const i = p.withdrawLog.findIndex((x) => x.amount === w.amount);
-      if (i >= 0) p.withdrawLog.splice(i, 1);
+      if (p.lastWithdrawAt === w.created) p.lastWithdrawAt = w.prevAt || 0; // a failed withdrawal does not use up the 24 h cooldown
       game.touch(p);
     }
     game.touchMeta();

@@ -74,31 +74,12 @@ async function bootSession() {
   showLogin();
 }
 
-// ---- account chip + menu -----------------------------------------------------------------------------------------
+// ---- settings button (the menu itself is in settings.js) -----------------------------------------------------------------------------------------
 function renderAccountChip() {
   const b = $("btn-settings");
   if (!b) return;
-  b.textContent = state.guest ? "👤" : "👛";
-  b.title = state.guest ? "Guest — connect a wallet" : "Wallet " + short(state.wallet);
-}
-function openAccount() {
-  if (!net.info) return;
-  const wallets = Wallet.list();
-  const connect = state.guest
-    ? `<p class="small">You are playing as a <b>guest</b>. Connect a Solana wallet to save your progress on it, buy packs and withdraw $MINE.</p>
-       ${wallets.length ? wallets.map((x) => `<button type="button" class="login-btn wallet" data-w="${x.id}">👛 Connect ${x.name}</button>`).join("") : `<p class="small dim">No wallet detected in this browser.</p>`}`
-    : `<p class="small">Wallet <b class="mono">${short(state.wallet)}</b> · progress is saved on it.</p>`;
-  openModal(`<h2>${state.guest ? "👤 Guest" : "👛 " + esc(state.name)}</h2>
-    <p class="small">Pack: <b>${tierName()}</b>${state.paid ? "" : " · no withdrawals · mining stops at " + fmtN(net.info.free.cap) + " $MINE"}</p>
-    ${connect}
-    <div class="modal-actions"><button type="button" class="btn-secondary" id="acct-rename">✎ Rename</button><button type="button" class="btn-secondary" id="acct-out">Log out</button><button type="button" class="btn-secondary" id="acct-close">Close</button></div>`);
-  $("acct-close").onclick = closeModal;
-  $("acct-rename").onclick = () => { closeModal(); renameUser(); };
-  $("acct-out").onclick = async () => {
-    if (state.guest) return confirmModal("Log out of a guest account?", "A guest has no wallet to restore from. You will lose this progress forever.", "Log out", doLogout);
-    doLogout();
-  };
-  document.querySelectorAll("#dyn-box [data-w]").forEach((el) => (el.onclick = () => { const e = Wallet.list().find((x) => x.id === el.dataset.w); if (e) walletLogin(e); }));
+  b.textContent = "⚙️";
+  b.title = "Settings";
 }
 async function doLogout() {
   try { await api("POST", "logout", {}); } catch { /* */ }
@@ -108,5 +89,5 @@ async function doLogout() {
 function setupLogin() {
   $("login-wallets").addEventListener("click", (e) => { const b = e.target.closest("[data-w]"); if (b) { const en = Wallet.list().find((x) => x.id === b.dataset.w); if (en) walletLogin(en); } });
   $("btn-guest").onclick = guestLogin;
-  $("btn-settings").onclick = openAccount;
+  $("btn-settings").onclick = openSettings;
 }

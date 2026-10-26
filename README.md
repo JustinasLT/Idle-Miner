@@ -7,7 +7,7 @@ sending crafted requests cannot give you anything.
 ## Run locally
 ```
 npm install
-npm test            # 27 server checks (cheats, rate limits, chain analysis, withdrawals...)
+npm test            # 37 server checks (cheats, rate limits, chain analysis, withdrawals...)
 npm start           # http://localhost:3000
 ```
 
@@ -21,7 +21,8 @@ npm start           # http://localhost:3000
 | `MINE_DECIMALS` | Token decimals (default 6). |
 | `TREASURY_SECRET_KEY` | Treasury wallet secret (base58). Holds the $MINE players deposit and pays withdrawals. **Keep it secret, only in host env vars.** |
 | `MERCHANT_WALLET` | Public address that receives SOL from pack sales (straight to you, not the treasury). |
-| `MINE_PER_SOL` | Price conversion for SOL packs (default 100000 $MINE = 1 SOL). |
+| `MINE_PER_SOL` | Price conversion for SOL packs (default 1,000,000 $MINE = 1 SOL; $MINE price = 90% of the SOL value). |
+| `DEV_FAUCET` | `on`/`off`. The "Test money" shop tab (free cash + free $MINE, no cooldown). Default: on, except on `mainnet-beta`. **Turn it off before real money is involved** — it mints withdrawable $MINE. |
 | `KEEPALIVE_URL` | Optional; defaults to `RENDER_EXTERNAL_URL`. The server pings its own `/api/health` every 10 min. |
 | `TRUST_PROXY` | Auto-on on Render (`RENDER=true`); set `0` to disable. |
 
@@ -39,8 +40,14 @@ server, so also add a free external pinger (UptimeRobot / cron-job.org) hitting
 ## Game rules implemented
 - Login: Solana wallet (signed one-time message) or guest. Guests can't withdraw; linking a wallet later keeps the progress (if that wallet already has an account you switch to it).
 - Free tier: everything except withdrawals, earns up to **20,000 $MINE** (about 1–2 h of play), then $MINE earning stops until any pack is bought. Paid tiers are uncapped (original earn rates).
-- Packs (one-time each): Prospector 40k, Foreman 100k, Tycoon 250k $MINE; paying in SOL costs 10% more than $MINE. Free earnings count toward the first pack (e.g. 20k earned + 20k extra).
-- Offline earnings are capped at 8 hours.
+- Packs (one-time each): Prospector 0.05 SOL (45k $MINE), Foreman 0.15 SOL (135k), Tycoon 0.4 SOL (360k). Smaller loot than before (Prospector = 4 Rare, Foreman = 6 Epic, Tycoon = 8 Legendary).
+- Pacing: max hero level takes about 15 days at ~12 h/day of play.
+- Mining loot lands in a pending list; the **Claim mining rewards** button on the mine screen moves it to the backpack (cap 100 pending, extra is auto-sold).
+- Item upgrades: +1 to +10 (+10% stats each), success chance falls from 95% to 7%. First 3 cost coins only, +4..+10 cost coins + $MINE. A failed upgrade keeps the level but spends the price.
+- Quests (+10% earnings each, max +50%): hold 50k $MINE, deposit 50k, spend 25k, 24 h without withdrawing, link X and Discord (handles are **not verified**). All five unlock Offline Earnings (up to 8 h at 50% cash). Without it, earning stops 15 min after you close the tab.
+- Shop boosts (paid in $MINE, 2 h each, stackable to 12 h): +100% XP, +50% earnings, +100% power ($MINE share). Prices in `server/config.js` (`PRICES`).
+- Withdrawals: 20% fee, max 250k per withdrawal (gross), 24 h cooldown.
+- Settings: sound/music, change username, log out, reset progress, delete account (wallet accounts holding $MINE can't be deleted).
 - Bank: deposit/withdraw $MINE. SOL pack purchases go directly to `MERCHANT_WALLET`.
 
 ## Security notes

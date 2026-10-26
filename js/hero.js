@@ -5,9 +5,10 @@ let fx = Shared.FX0(), hmult = { y: 1, s: 1, c: 1 };
 const itemById = (id) => Shared.itemById(state, id);
 const spareItems = () => Shared.spareItems(state);
 const itemPower = Shared.itemPower;
+const itemName = Shared.itemName;
+const UP_MAX = Shared.UP_MAX;
 const sellValue = Shared.sellValue;
 const repairCost = (it, mine) => Shared.repairCost(it, mine, fx);
-const fuseCost = (r, mine) => Shared.fuseCost(r, mine);
 const canEquip = (it) => Shared.canEquip(state, it);
 const invCap = () => Shared.invCap(state);
 function computeFx() { fx = Shared.computeFx(state); hmult = Shared.heroMult(state, fx); }

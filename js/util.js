@@ -26,7 +26,7 @@ function bump(el) {
 }
 // one shared popup (upgrade picker, confirmations)
 let modalHook = null;
-function openModal(html) { $("dyn-box").innerHTML = html; $("dyn-modal").classList.remove("hidden"); }
+function openModal(html, cls = "") { $("dyn-box").className = "modal " + cls; $("dyn-box").innerHTML = html; $("dyn-modal").classList.remove("hidden"); }
 function closeModal() {
   $("dyn-modal").classList.add("hidden");
   if (modalHook) modalHook();
@@ -36,4 +36,15 @@ function confirmModal(title, text, yes, fn) {
   openModal(`<h2>${title}</h2><p>${text}</p><div class="modal-actions"><button type="button" class="btn-primary" id="m-yes">${yes}</button><button type="button" class="btn-secondary" id="m-no">Cancel</button></div>`);
   $("m-yes").onclick = () => { closeModal(); fn(); };
   $("m-no").onclick = closeModal;
+}
+// like confirmModal, but the player has to type a word first (reset / delete)
+function typedConfirm(title, text, word, yes, fn) {
+  openModal(`<h2>${title}</h2><p>${text}</p><p class="small">Type <b>${word}</b> to continue:</p>
+    <input id="tc-in" class="name-in" autocomplete="off" autocapitalize="characters" spellcheck="false" />
+    <div class="modal-actions"><button type="button" class="btn-primary danger" id="tc-yes" disabled>${yes}</button><button type="button" class="btn-secondary" id="tc-no">Cancel</button></div>`);
+  const inp = $("tc-in"), ok = () => inp.value.trim().toUpperCase() === word;
+  inp.oninput = () => { $("tc-yes").disabled = !ok(); };
+  $("tc-yes").onclick = () => { if (ok()) { closeModal(); fn(); } };
+  $("tc-no").onclick = closeModal;
+  inp.focus();
 }

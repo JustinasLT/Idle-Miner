@@ -5,12 +5,12 @@ const os = require("os"), path = require("path"), fs = require("fs"), assert = r
 const DATA = path.join(os.tmpdir(), "idle-miner-test-" + Date.now() + ".json");
 process.env.DATA_FILE = DATA; process.env.RATE_LIMIT = "1000000"; delete process.env.DATABASE_URL;
 const tryReq = (n) => { try { return require(n); } catch { return null; } };
-const nacl = tryReq("tweetnacl"), bs58 = tryReq("bs58") || require("./test-shims/bs58.js");
+const nacl = tryReq("tweetnacl"), bs58 = tryReq("bs58") || require("./bs58.js");
 if (!nacl) { console.error("tweetnacl is required for the wallet-login tests: npm install"); process.exit(1); }
 const { createApp } = require("./server.js");
 const { analyzeDeposit, analyzePayment } = require("./chain.js");
 const S = require("../js/shared.js");
-const { C, PACKS } = require("./config.js");
+const { C, PACKS, PRICES } = require("./config.js");
 
 let n = 0;
 const AL = "ABCDEFGHJKLMNPQRSTUVWXYZ";
@@ -33,7 +33,8 @@ function fakeChain() {
 
 (async () => {
   const chain = fakeChain();
-  const app = await createApp({ chain, bs58, nacl });
+  let forcedRoll = null; // makes item-upgrade rolls deterministic: 0 = always succeeds, 0.999 = always fails
+  const app = await createApp({ chain, bs58, nacl, rng: () => (forcedRoll != null ? forcedRoll : Math.random()) });
   const { game, bank, server } = app;
   await new Promise((r) => server.listen(0, r));
   const B = "http://localhost:" + server.address().port;
@@ -45,6 +46,10 @@ function fakeChain() {
   const T = async (name, fn) => { try { await fn(); console.log("  ok  ", name); n++; } catch (e) { console.error("  FAIL", name, "\n", e); process.exit(1); } };
   const advance = (ms) => game.setClock(game.now() - Date.now() + ms + 0); // server clock jumps by ms (absolute offset, see helper below)
   let clock = 0; const step = (ms) => { clock += ms; game.setClock(clock); };
+  const near = (a, b, tol = 0.01) => Math.abs(a - b) <= Math.abs(b) * tol + 1e-9;
+  // gives a player every quest: hold 50k, deposited 50k, spent 25k, X + Discord linked, 24 h without a withdrawal
+  const finishQuests = (p) => { p.balance = Math.max(p.balance, 50000); p.q.deposited = 50000; p.q.spent = 25000; p.q.x = "x" + p.id; p.q.discord = "d" + p.id; p.created -= 2 * 864e5; };
+  const totalXp = (h) => { let x = h.xp; for (let l = 1; l < h.lvl; l++) x += S.xpNeed(l); return x; };
 
   console.log("chain verification rules");
   await T("analyzeDeposit only credits what the player's wallet really sent to the treasury", () => {
@@ -128,31 +133,41 @@ function fakeChain() {
     const earned = p.cash;
     assert(Math.abs(earned - rate * 600) < rate * 600 * 0.02, `expected ~${rate * 600}, got ${earned}`);
   });
-  await T("offline income is capped at 8 hours and paid at 50 %", async () => {
-    const p = game.db.players[guest.id];
-    game.touchPlayer(p); p.pendingOffline = 0; const rate = S.income(p, game.now()).perSec;
-    step(30 * 3600e3);                                            // away for 30 hours
-    const res = await call("POST", "/api/sync", {}, gTok);
-    assert(res.j.pendingOffline > 0);
-    const expect = rate * 8 * 3600 * 0.5;
-    assert(Math.abs(res.j.pendingOffline - expect) < expect * 0.01, `pending ${res.j.pendingOffline} vs ${expect}`);
-    const cash0 = res.j.cash;
-    const c = await act(gTok, { type: "claimOffline" });
-    assert(c.j.ok && Math.abs(c.j.cash - cash0 - expect) < expect * 0.02 + 1, "claimed");
-    assert((await act(gTok, { type: "claimOffline" })).s === 400, "nothing left to claim twice");
+  await T("without Offline Earnings you are paid for 15 minutes after leaving, not longer", async () => {
+    const q = game.createPlayer("Casual"); game.touchPlayer(q);
+    const rate = S.income(q, game.now()).perSec;
+    assert(S.offlineUnlocked(q, game.now()) === false);
+    step(5 * 3600e3);                                            // away for 5 hours
+    game.touchPlayer(q);
+    const expect = rate * 15 * 60;                               // 100 % for the first 15 minutes, then nothing
+    assert(near(q.pendingOffline, expect), `pending ${q.pendingOffline} vs ${expect}`);
+    assert(game.view(q).offline.unlocked === false);
   });
-  await T("double-offline costs $MINE the player does not have", async () => {
-    const p = game.db.players[guest.id]; p.pendingOffline = 1000;
-    const r = await act(gTok, { type: "claimOffline", double: true });
-    assert(r.s === 400 && /Not enough/.test(r.j.error) && p.pendingOffline === 1000);
+  await T("with all 5 quests done, Offline Earnings pay up to 8 hours at 50 %", async () => {
+    const q = game.createPlayer("Perk"); finishQuests(q); game.touchPlayer(q);
+    assert(S.offlineUnlocked(q, game.now()) === true);
+    const rate = S.income(q, game.now()).perSec;
+    step(30 * 3600e3);                                           // away for 30 hours
+    game.touchPlayer(q);
+    const expect = rate * 8 * 3600 * 0.5;
+    assert(near(q.pendingOffline, expect), `pending ${q.pendingOffline} vs ${expect}`);
+    const cash0 = q.cash, c = game.act(q, { type: "claimOffline" });
+    assert(near(q.cash - cash0, expect, 0.02) && q.pendingOffline === 0);
+    let threw = false; try { game.act(q, { type: "claimOffline" }); } catch (e) { threw = e.status === 400; }
+    assert(threw, "nothing left to claim twice");
+    let dbl = false; try { q.pendingOffline = 100; q.balance = 100; game.act(q, { type: "claimOffline", double: true }); dbl = q.balance === 100 && q.cash > 0; } catch { dbl = false; }
+    assert(dbl, "the old x2 option is gone: it neither charges $MINE nor doubles");
   });
   await T("malformed / malicious actions are refused and change nothing", async () => {
-    const p = game.db.players[guest.id], snap = () => JSON.stringify([p.mines, p.inv, p.balance, p.eq, p.hero.crates, p.researchUnlocked]), before = snap(), cash0 = p.cash;
+    const p = game.db.players[guest.id], snap = () => JSON.stringify([p.mines, p.inv, p.balance, p.eq, p.hero.crates, p.pending, p.boosts, p.q]), before = snap(), cash0 = p.cash;
     const bads = [{ type: "upgrade", target: "shaft", idx: -1, n: 1 }, { type: "upgrade", target: "shaft", idx: 29, n: 1 }, { type: "upgrade", target: "shaft", idx: 0, n: 1e9 },
       { type: "upgrade", target: "shaft", idx: 0, n: -5 }, { type: "upgrade", target: "shaft", idx: "0", n: 1 }, { type: "upgrade", target: "__proto__", n: 1 }, { type: "constructor" },
       { type: "__proto__" }, { type: "toString" }, {}, { type: 5 }, { type: "equip", id: 99999 }, { type: "sell", id: "x" }, { type: "buy", item: "free_money2" }, { type: "buy", item: "page" },
-      { type: "buy", item: "tome" }, { type: "fuse", slot: "Pickaxe", r: 9 }, { type: "crate", slot: "Pickaxe" }, { type: "research", id: "nope" },
-      { type: "claimPrize" }, { type: "prestige" }];
+      { type: "buy", item: "tome" }, { type: "crate", slot: "Pickaxe" }, { type: "research", id: "cost10" },
+      { type: "claimPrize" }, { type: "prestige" },
+      { type: "upgradeItem", id: 99999 }, { type: "upgradeItem" }, { type: "claimRewards" }, { type: "reset" }, { type: "reset", confirm: "yes" },
+      { type: "linkSocial", kind: "x", handle: "bad handle!" }, { type: "linkSocial", kind: "facebook", handle: "abc" }, { type: "linkSocial", kind: "discord", handle: "a" },
+      { type: "buy", item: "boost_xp" }, { type: "buy", item: "boost_sell" }, { type: "buy", item: "crate" }, { type: "buy", item: "shaft5" }, { type: "buy", item: "infra5" }, { type: "fuse", slot: "Ring", r: 0 }];
     for (const b of bads) { const r = await act(gTok, b); assert(r.s === 400, JSON.stringify(b) + " -> " + r.s + " " + JSON.stringify(r.j.error)); }
     assert(snap() === before && p.cash >= cash0, "state unchanged (cash may only have grown by real income)");
   });
@@ -165,10 +180,17 @@ function fakeChain() {
     p.cash = 1e9; r = await act(gTok, { type: "upgrade", target: "shaft", idx: 0, n: "max" });
     assert(r.j.ok && r.j.mine.shafts[0].level > 100 && r.j.cash >= 0);
   });
-  await T("free money has a cooldown (no infinite cash loop)", async () => {
-    const a = await act(gTok, { type: "buy", item: "free_money" });
-    assert(a.j.ok, JSON.stringify(a.j));
-    assert((await act(gTok, { type: "buy", item: "free_money" })).s === 400);
+  await T("test faucet: free cash and free $MINE without a cooldown, and it can be switched off", async () => {
+    const p = game.db.players[guest.id], b0 = p.balance;
+    const a = await act(gTok, { type: "buy", item: "free_money" }), a2 = await act(gTok, { type: "buy", item: "free_money" });
+    assert(a.j.ok && a2.j.ok && a2.j.cash > a.j.cash, "no cooldown");
+    const m1 = await act(gTok, { type: "buy", item: "free_mine" }), m2 = await act(gTok, { type: "buy", item: "free_mine" });
+    assert(m1.j.ok && m2.j.ok && Math.abs(p.balance - b0 - 2 * C.DEV_MINE_AMOUNT) < 1e-6, "$MINE faucet");
+    assert(p.earned === 0 || p.earned < C.DEV_MINE_AMOUNT, "faucet $MINE is not 'mined' $MINE");
+    p.balance = b0;
+    C.DEV_FAUCET = false;
+    try { assert((await act(gTok, { type: "buy", item: "free_money" })).s === 400 && (await act(gTok, { type: "buy", item: "free_mine" })).s === 400); } finally { C.DEV_FAUCET = true; }
+    assert((await call("GET", "/api/config")).j.devFaucet === true);
   });
   await T("items can only be sold / equipped when really owned; gear above hero level can't be equipped", async () => {
     const p = game.db.players[guest.id];
@@ -180,14 +202,32 @@ function fakeChain() {
     const c0 = p.cash; const r = await act(gTok, { type: "sell", id: 9001 });
     assert(r.j.ok && r.j.cash > c0);
   });
-  await T("drops are rolled by the server: ~expected count over a long online stretch, never from the client", async () => {
+  await T("drops are rolled by the server and wait for 'Claim mining rewards' (nothing lands in the backpack by itself)", async () => {
     const q = game.createPlayer("Dropper"); const m = q.mines.start; m.unlockedShaftCount = 30; m.shafts.forEach((s) => (s.level = 50)); q.invPages = 5;
     game.touchPlayer(q);
     for (let i = 0; i < 4 * 60 * 24; i++) { step(15e3); game.settle(q); } // 24 h online
+    const found = q.pending.items.length;
     assert(q.items > 5 && q.items < 400, "items found in a day: " + q.items);
-    assert(q.hero.n <= q.items + q.hero.crates + 1);
+    assert(q.inv.length === 3, "backpack untouched until the claim: " + q.inv.length);
+    assert(found > 0 && q.hero.crates === 0 && q.pending.crates >= 0);
+    assert(q.hero.n <= q.items + q.pending.crates + 1);
+    const v = game.view(q);
+    assert(v.pending.n === found && v.pending.items.length === found && v.pending.max === C.PENDING_MAX && v.pending.cash > 0, "view shows what was mined since the last claim");
+    const crates = q.pending.crates, r = game.act(q, { type: "claimRewards" });
+    assert(r.claimed.items === found && r.claimed.crates === crates && r.claimed.left === 0);
+    assert(q.inv.length === 3 + found && q.pending.items.length === 0 && q.pending.crates === 0 && q.hero.crates === crates);
+    assert(game.view(q).pending.cash === 0 && game.view(q).pending.mine === 0, "counters restart after a claim");
+    let threw = false; try { game.act(q, { type: "claimRewards" }); } catch (e) { threw = e.status === 400; }
+    assert(threw, "nothing left to claim");
   });
-
+  await T("claiming with a full backpack keeps the rest waiting; a full reward stash auto-sells", async () => {
+    const q = game.createPlayer("Packrat"); game.touchPlayer(q);
+    for (let i = 0; i < 46; i++) q.inv.push({ id: 100 + i, slot: "Ring", r: 0, il: 1, v: 0.01, dur: 100, max: 100, aff: [], lock: false, up: 0 });
+    for (let i = 0; i < 5; i++) q.pending.items.push({ id: 500 + i, slot: "Ring", r: i % 3, il: 1, v: 0.01, dur: 100, max: 100, aff: [], lock: false, up: 0 });
+    const r = game.act(q, { type: "claimRewards" });
+    assert(r.claimed.items === 2 && r.claimed.left === 3 && q.pending.items.length === 3, JSON.stringify(r));
+    assert(q.inv.slice(-2).every((i) => i.r >= 1), "best items are claimed first");
+  });
   console.log("$MINE: free cap, fast start, offline window");
   await T("first 20 000 $MINE take ~90 minutes of play; free players then stop at 20 000", async () => {
     const q = game.createPlayer("Newbie"); q.lastSeen = game.now();
@@ -207,11 +247,17 @@ function fakeChain() {
     const gain = q.earned - e0;
     assert(gain > 0 && gain < 200, "normal rate after the fast start: " + gain + " $MINE per hour");
   });
-  await T("nobody mines while away for more than 8 hours", async () => {
-    const q = game.createPlayer("Sleeper"); q.packs[1] = true; q.power = 500; game.touchPlayer(q);
-    const e0 = q.earned; step(9 * 3600e3);
-    for (let i = 0; i < 12; i++) { step(5e3); game.tick(); }
-    assert(game.isActive(q, game.now()) === false, "inactive after 8h");
+  await T("$MINE stops 15 minutes after you close the game; with Offline Earnings it keeps going for up to 8 hours", async () => {
+    const a = game.createPlayer("Casual2"), b = game.createPlayer("Perk2"); a.packs[1] = b.packs[1] = true; finishQuests(b);
+    game.touchPlayer(a); game.touchPlayer(b);
+    step(10 * 60e3);
+    assert(game.isActive(a, game.now()) && game.isActive(b, game.now()), "both still earn 10 min after leaving");
+    step(10 * 60e3);
+    assert(!game.isActive(a, game.now()) && game.isActive(b, game.now()), "20 min: only the Offline Earnings player earns");
+    const e0 = a.earned, f0 = b.earned; for (let i = 0; i < 12; i++) { step(5e3); game.tick(); }
+    assert(a.earned === e0 && b.earned > f0, "payouts follow the activity window");
+    step(9 * 3600e3);
+    assert(!game.isActive(b, game.now()), "nobody mines while away for more than 8 hours");
   });
 
   console.log("packs & bank");
@@ -230,9 +276,10 @@ function fakeChain() {
     const s1 = sig(1);
     assert((await call("POST", "/api/bank/deposit/confirm", { signature: s1 }, gTok)).j.status === "pending");
     chain.deposits[s1] = { status: "ok", baseUnits: 25_000_000n };
-    const b0 = gp().balance;
+    const b0 = gp().balance, d0 = gp().q.deposited;
     const r = await call("POST", "/api/bank/deposit/confirm", { signature: s1 }, gTok);
     assert(r.j.status === "ok" && Math.abs(gp().balance - b0 - 25) < 1e-9, JSON.stringify(r.j));
+    assert(Math.abs(gp().q.deposited - d0 - 25) < 1e-9, "deposits count for the deposit quest");
     assert((await call("POST", "/api/bank/deposit/confirm", { signature: s1 }, gTok)).s === 400, "replay");
     assert((await call("POST", "/api/bank/deposit/confirm", { signature: "short" }, gTok)).s === 400);
     chain.deposits[sig(2)] = { status: "error", error: "not yours" };
@@ -242,18 +289,22 @@ function fakeChain() {
     assert((await call("POST", "/api/bank/deposit/prepare", { amount: -5 }, gTok)).s === 400);
     assert((await call("POST", "/api/bank/deposit/prepare", { amount: "abc" }, gTok)).s === 400);
   });
-  await T("buying a pack with $MINE: price enforced, once only, gear + cash + xp granted", async () => {
-    const p = gp(); p.balance = 39999;
+  await T("buying a pack with $MINE: price enforced, once only, a modest head start (not the whole game)", async () => {
+    const pk = PACKS[0], p = gp(); p.balance = pk.mine - 1;
     assert((await call("POST", "/api/pack/mine", { pack: 1 }, gTok)).s === 400, "1 short");
-    p.balance = 60000; const cash0 = p.cash;
+    p.balance = pk.mine + 20000; const cash0 = p.cash, xp0 = totalXp(p.hero), spent0 = p.q.spent, invN = p.inv.length;
     const r = await call("POST", "/api/pack/mine", { pack: 1 }, gTok);
     assert(r.j.pack === 1 && Math.abs(r.j.balance - 20000) < 1e-6 && r.j.packs[1] && r.j.paid);
-    assert(r.j.hero.lvl >= 8 && r.j.cash >= cash0 + 250e3);
-    const epics = p.inv.filter((i) => i.r === 3 && i.il === p.hero.lvl);
-    assert(epics.length === 8 && S.SLOTS.every((s) => p.eq[s] && S.itemById(p, p.eq[s]).r >= 3), "8 Epic items equipped");
+    assert(near(totalXp(p.hero) - xp0, 500, 0.001) && near(r.j.cash - cash0, 25e3, 0.2), "XP and cash from the pack");
+    assert(p.inv.length === invN + 4, "4 pieces, not 8");
+    const rare = p.inv.filter((i) => i.r === 2 && i.il === p.hero.lvl);
+    assert(rare.length === 4 && ["Pickaxe", "Helmet", "Shoes", "Gloves"].every((s) => S.itemById(p, p.eq[s]).r === 2), "4 Rare items equipped");
+    assert(p.q.spent - spent0 === pk.mine, "spending $MINE counts for the spend quest");
     assert((await call("POST", "/api/pack/mine", { pack: 1 }, gTok)).s === 400, "only once");
     assert((await call("POST", "/api/pack/mine", { pack: 7 }, gTok)).s === 400);
-    assert(PACKS[0].mine === 40000 && Math.abs(PACKS[0].lamports / 1e9 * 100000 * 0.9 - 40000) < 15, "SOL price is 10% above the $MINE price");
+    assert(pk.lamports === 50_000_000 && pk.mine === 45000 && PACKS[1].lamports === 150_000_000 && PACKS[2].lamports === 400_000_000, "0.05 / 0.15 / 0.4 SOL");
+    assert(Math.abs(pk.lamports / 1e9 * 1e6 * 0.9 - pk.mine) < 500, "$MINE price is 10% below the SOL price");
+    assert(PACKS.every((x) => x.gearRarity <= 4) && PACKS[0].slots.length < PACKS[1].slots.length && PACKS[1].slots.length < PACKS[2].slots.length, "lower tier gear, fewer pieces than before");
   });
   await T("buying a pack with SOL: order memo, verified payment, one use", async () => {
     const o = await call("POST", "/api/pack/order", { pack: 2 }, gTok);
@@ -275,23 +326,32 @@ function fakeChain() {
     const other = (await call("POST", "/api/guest", { name: "Mallory" })).j;
     assert((await call("POST", "/api/pack/confirm", { order: o3.j.orderId, signature: sig(12) }, other.token)).s === 400);
   });
-  await T("withdraw: balance deducted first, paid to the player's own wallet, limits enforced", async () => {
-    const p = gp(); p.balance = 5000; p.lastWithdrawAt = 0;
+  await T("withdraw: 20 % fee, max 250k, 24 h cooldown, paid to the player's own wallet", async () => {
+    app.resetLimits(); const p = gp(); p.balance = 5000; p.lastWithdrawAt = 0;
     assert((await call("POST", "/api/bank/withdraw", { amount: 50 }, gTok)).s === 400, "below minimum");
     assert((await call("POST", "/api/bank/withdraw", { amount: 99999999 }, gTok)).s === 400, "more than balance");
     assert((await call("POST", "/api/bank/withdraw", { amount: -1 }, gTok)).s === 400);
+    const big = await call("POST", "/api/bank/withdraw", { amount: 250001 }, gTok);
+    assert(big.s === 400 && /maximum/i.test(big.j.error), big.j.error);
     const r = await call("POST", "/api/bank/withdraw", { amount: 1000, wallet: "Attacker111", to: "Attacker111" }, gTok);
-    assert(r.s === 200 && Math.abs(r.j.balance - 4000) < 1e-6, JSON.stringify(r.j));
+    assert(r.s === 200 && Math.abs(r.j.balance - 4000) < 1e-6 && r.j.fee === 200 && r.j.net === 800, JSON.stringify(r.j));
     await bank.processWithdrawals();
     const w = Object.values(game.db.withdrawals).find((x) => x.pid === p.id);
-    assert(w.state === "done" && w.wallet === wallet() && chain.signed[0].w === wallet() && chain.signed[0].base === 1_000_000_000n, JSON.stringify(w));
-    assert((await call("POST", "/api/bank/withdraw", { amount: 500 }, gTok)).s === 429, "cooldown");
-    p.lastWithdrawAt = 0; p.balance = 1e6;
-    const lim = await call("POST", "/api/bank/withdraw", { amount: C && 400000 }, gTok);
-    assert(lim.s === 400 && /limit/i.test(lim.j.error), lim.j.error);
+    assert(w.state === "done" && w.wallet === wallet() && chain.signed[0].w === wallet() && chain.signed[0].base === 800_000_000n, "the wallet receives 80 %: " + JSON.stringify(w));
+    const again = await call("POST", "/api/bank/withdraw", { amount: 500 }, gTok);
+    assert(again.s === 429 && /24 hour/.test(again.j.error), again.j.error);
+    step(23 * 3600e3);
+    assert((await call("POST", "/api/bank/withdraw", { amount: 500 }, gTok)).s === 429, "still on cooldown after 23 h");
+    const bv = (await call("GET", "/api/bank", null, gTok)).j;
+    assert(bv.cooldownLeft > 0 && bv.cooldownLeft <= 3600e3 && bv.withdrawFee === 0.2 && bv.maxWithdraw === 250000);
+    step(61 * 60e3);
+    p.balance = 1e6;
+    const ok2 = await call("POST", "/api/bank/withdraw", { amount: 250000 }, gTok);
+    assert(ok2.s === 200 && ok2.j.net === 200000 && ok2.j.fee === 50000, "exactly 250k is allowed, fee 50k: " + JSON.stringify(ok2.j));
+    await bank.processWithdrawals();
   });
   await T("failed or expired withdrawals are refunded exactly once; crash after signing never pays twice", async () => {
-    const p = gp(); p.balance = 1000; p.lastWithdrawAt = 0; p.withdrawLog = [];
+    app.resetLimits(); const p = gp(); p.balance = 1000; p.lastWithdrawAt = 0;
     chain.wStatus = "pending";
     await call("POST", "/api/bank/withdraw", { amount: 300 }, gTok);
     await bank.processWithdrawals();
@@ -299,6 +359,7 @@ function fakeChain() {
     assert(w.state === "sent" && chain.broadcasts.length >= 1 && Math.abs(p.balance - 700) < 1e-9);
     chain.wStatus = "expired"; await bank.processWithdrawals(); await bank.processWithdrawals();
     assert(w.state === "failed" && Math.abs(p.balance - 1000) < 1e-9, "refunded once: " + p.balance);
+    assert(p.lastWithdrawAt === 0, "a failed withdrawal does not use up the 24 h cooldown");
     // rpc failures while signing: nothing is lost
     p.lastWithdrawAt = 0; chain.signFails = 2; chain.wStatus = "confirmed";
     await call("POST", "/api/bank/withdraw", { amount: 200 }, gTok);
@@ -311,9 +372,148 @@ function fakeChain() {
     chain.treasuryTokens = 10n ** 15n;
   });
 
+  console.log("gear upgrades, quests, boosts, account");
+  await T("item upgrades: chance curve, coins for +1..+3, coins + $MINE for +4..+10, names and stats grow", async () => {
+    assert(S.UP_CHANCE.length === 10 && S.UP_CHANCE.every((c, i) => c > 0 && c < 1 && (i === 0 || c < S.UP_CHANCE[i - 1])), "success chance falls with every level");
+    const q = game.createPlayer("Smith"), tok = game.newSession(q); game.touchPlayer(q);
+    const it = S.itemById(q, q.eq.Pickaxe), mine = q.mines.start;
+    for (let n = 0; n < 10; n++) {
+      const inf = S.upgradeInfo({ ...it, up: n }, mine);
+      assert(inf.cash > 0 && (n < 3 ? inf.mine === 0 : inf.mine > 0), "level " + n + " price " + JSON.stringify(inf));
+    }
+    assert(S.itemName(it) === "Common Pickaxe" && S.itemName({ ...it, up: 2 }) === "Common Pickaxe +2");
+    const pow0 = S.itemPower(it), yield0 = S.computeFx(q).yield;
+    q.cash = 1e12; forcedRoll = 0;                                           // every roll succeeds
+    const cost1 = S.upgradeInfo(it, mine).cash;
+    let r = await act(tok, { type: "upgradeItem", id: it.id });
+    assert(r.j.ok && r.j.upgrade.ok && it.up === 1 && r.j.upgrade.name === "Common Pickaxe +1", JSON.stringify(r.j.upgrade));
+    assert(near(1e12 - q.cash, cost1, 0.001), "coins were charged");
+    assert(S.itemPower(it) > pow0 && S.computeFx(q).yield > yield0 && near(S.computeFx(q).yield / yield0, 1.1, 0.01), "+1 adds 10% of the base stat");
+    assert(r.j.inv.find((i) => i.id === it.id).up === 1, "the client sees the new level");
+    await act(tok, { type: "upgradeItem", id: it.id }); await act(tok, { type: "upgradeItem", id: it.id });
+    assert(it.up === 3, "three coin-only upgrades without any $MINE");
+    q.balance = 0;
+    const cash3 = q.cash;
+    r = await act(tok, { type: "upgradeItem", id: it.id });
+    assert(r.s === 400 && /\$MINE/.test(r.j.error) && it.up === 3 && q.cash >= cash3, "+4 needs $MINE and nothing is taken if it is missing");
+    q.balance = 100; const inf3 = S.upgradeInfo(it, mine);
+    r = await act(tok, { type: "upgradeItem", id: it.id });
+    assert(r.j.upgrade.ok && it.up === 4 && near(100 - q.balance, inf3.mine, 0.001) && q.balance < 100, "+4 charged $MINE: " + inf3.mine);
+    assert(near(q.q.spent, inf3.mine, 0.001), "upgrade spending counts for the spend quest");
+    forcedRoll = 0.9999;                                                      // every roll fails
+    const cashF = q.cash, balF = q.balance;
+    r = await act(tok, { type: "upgradeItem", id: it.id });
+    assert(r.j.ok && r.j.upgrade.ok === false && it.up === 4 && q.cash < cashF && q.balance < balF, "a failed attempt keeps the level but the price is gone");
+    forcedRoll = 0; q.balance = 1e9; it.up = 9;
+    r = await act(tok, { type: "upgradeItem", id: it.id });
+    assert(it.up === 10 && r.j.upgrade.name === "Common Pickaxe +10");
+    r = await act(tok, { type: "upgradeItem", id: it.id });
+    assert(r.s === 400 && /already/i.test(r.j.error), "+10 is the maximum");
+    const poor = game.createPlayer("Poor"), pt = game.newSession(poor); poor.cash = 1;
+    assert((await act(pt, { type: "upgradeItem", id: S.itemById(poor, poor.eq.Pickaxe).id })).s === 400 && S.itemById(poor, poor.eq.Pickaxe).up === 0, "not enough coins is refused");
+    assert((await act(pt, { type: "upgradeItem", id: S.itemById(q, q.eq.Shoes).id })).s === 400, "can't upgrade somebody else's item");
+    forcedRoll = null;
+  });
+  await T("upgraded gear is protected from 'Sell all' and sells for more", async () => {
+    const q = game.createPlayer("Seller"); game.touchPlayer(q);
+    const mk = (id, up) => ({ id, slot: "Ring", r: 0, il: 1, v: 0.01, dur: 100, max: 100, aff: [], lock: false, up });
+    q.inv.push(mk(900, 0), mk(901, 3));
+    assert(S.sellValue(mk(1, 3)) > S.sellValue(mk(1, 0)));
+    game.act(q, { type: "sellAll" });
+    assert(!q.inv.some((i) => i.id === 900) && q.inv.some((i) => i.id === 901), "plain item sold, +3 item kept");
+  });
+  await T("quests: +10 % earnings each (max +50 %), Offline Earnings only with all five", async () => {
+    const q = game.createPlayer("Quester"); game.touchPlayer(q); const t = () => game.now();
+    const base = S.income(q, t()).base;
+    const boost = () => Math.round(S.earnBoost(q, t()) * 100);
+    assert(boost() === 0 && S.questsDone(q, t()) === 0 && !S.offlineUnlocked(q, t()));
+    q.balance = 49999; assert(boost() === 0, "1 short of holding 50k"); q.balance = 50000; assert(boost() === 10, "hold 50k");
+    q.q.deposited = 50000; assert(boost() === 20, "deposit 50k");
+    q.q.spent = 24999; assert(boost() === 20); q.q.spent = 25000; assert(boost() === 30, "spend 25k");
+    q.created = t() - 23 * 3600e3; assert(boost() === 30, "23 h without withdrawing is not enough");
+    q.created = t() - 25 * 3600e3; assert(boost() === 40, "24 h without withdrawing");
+    q.lastWithdrawAt = t() - 3600e3; assert(boost() === 30, "a withdrawal restarts the clock");
+    q.lastWithdrawAt = 0;
+    q.q.x = "someone"; assert(boost() === 40, "X alone is not enough");
+    assert(!S.offlineUnlocked(q, t()), "4 of 5 quests: still no Offline Earnings");
+    q.q.discord = "someone"; assert(boost() === 50 && S.offlineUnlocked(q, t()), "all five: +50 % and Offline Earnings");
+    const v = game.view(q);
+    assert(v.quests.length === 5 && v.quests.every((x) => x.done) && v.earnBoost.total === 0.5 && v.offline.unlocked && near(v.cashPerSec, base * 1.5, 0.001), "cash income carries the boost");
+    q.balance = 10; assert(boost() === 40 && !game.view(q).offline.unlocked, "dropping under 50k pauses the reward");
+  });
+  await T("linking X and Discord: validated, one account per handle, only once", async () => {
+    const q = game.createPlayer("Linker"), tok = game.newSession(q), o = game.createPlayer("Other"), ot = game.newSession(o);
+    assert((await act(tok, { type: "linkSocial", kind: "x", handle: "@Linker_1" })).j.social.x === "Linker_1");
+    assert((await act(tok, { type: "linkSocial", kind: "x", handle: "other" })).s === 400, "already linked");
+    assert((await act(ot, { type: "linkSocial", kind: "x", handle: "linker_1" })).s === 400, "same handle on another account (case-insensitive)");
+    assert((await act(tok, { type: "linkSocial", kind: "discord", handle: "linker.dev" })).j.social.discord === "linker.dev");
+    assert(S.questValue(q, game.now(), "social") === 2);
+  });
+  await T("shop boosts cost $MINE: +100 % XP, +50 % earnings, +100 % power (2 h each)", async () => {
+    const a = game.createPlayer("Plain"), b = game.createPlayer("Boosted"), c = game.createPlayer("Powered");
+    for (const p of [a, b, c]) game.touchPlayer(p);
+    b.balance = 5000; c.balance = 5000;
+    game.act(b, { type: "buy", item: "boost_xp" }); game.act(b, { type: "buy", item: "boost_earn" });
+    game.act(c, { type: "buy", item: "boost_power" });
+    assert(near(5000 - b.balance, PRICES.boost_xp + PRICES.boost_earn, 0.0001) && near(5000 - c.balance, PRICES.boost_power, 0.0001), "$MINE prices");
+    const left = b.boosts.xp - game.now(); assert(near(left, 2 * 3600e3, 0.01), "lasts 2 h");
+    const mixed = game.mining(c);
+    assert(mixed.powerMult === 2 && near(mixed.boostedPower, 2 * c.power, 0.0001) && c.power === S.heroPower(c) && game.mining(a).powerMult === 1, "power boost doubles the stake weight, the displayed/leaderboard power stays");
+    const cash0 = [a.cash, b.cash], xp0 = [totalXp(a.hero), totalXp(b.hero)];
+    for (let i = 0; i < 40; i++) { step(15e3); game.touchPlayer(a); game.touchPlayer(b); }
+    assert(near(b.cash - cash0[1], 1.5 * (a.cash - cash0[0]), 0.01), "earnings x1.5");
+    assert(near(totalXp(b.hero) - xp0[1], 2 * (totalXp(a.hero) - xp0[0]), 0.01), "XP x2");
+    for (let i = 0; i < 5; i++) game.act(b, { type: "buy", item: "boost_xp" });
+    let capped = false; b.balance = 1e6; try { game.act(b, { type: "buy", item: "boost_xp" }); } catch (e) { capped = e.status === 400; }
+    assert(capped, "boosts stack up to 12 h");
+    // the boost runs out exactly after its time
+    const d = game.createPlayer("Short"); game.touchPlayer(d); d.balance = 1000; game.act(d, { type: "buy", item: "boost_earn" });
+    step(3 * 3600e3 + 1); const rate = S.income(d, game.now()).base; game.touchPlayer(d);
+    assert(S.earnMult(d, game.now()) === 1 && rate > 0, "expired");
+  });
+  await T("hero levelling takes about 15 days of play, and no longer disappears on day 1", async () => {
+    let xp = 0; for (let l = 1; l < S.HERO_MAX; l++) xp += S.xpNeed(l);
+    const hours = xp / S.XP_PER_SEC / 3600;
+    assert(hours / 12 > 13 && hours / 12 < 17, "days at 12h/day: " + (hours / 12).toFixed(1));
+    const q = game.createPlayer("Grinder"); game.touchPlayer(q);
+    for (let i = 0; i < 4 * 60 * 12; i++) { step(15e3); game.touchPlayer(q); }     // 12 hours of play
+    assert(q.hero.lvl > 15 && q.hero.lvl < 40, "level after day 1: " + q.hero.lvl);
+    assert(PACKS[2].xp / xp < 0.06, "even the biggest pack is a small slice of the XP");
+  });
+  await T("the shop sells nothing but boosts now: no crates, no shaft/infrastructure boosts, no tome, no research, no forge", async () => {
+    const q = game.createPlayer("Shopper"), tok = game.newSession(q); game.touchPlayer(q); q.cash = 1e12; q.balance = 1e6;
+    for (const item of ["crate", "shaft5", "infra5", "tome", "boost_mine", "boost_sell", "boost_elev"]) assert((await act(tok, { type: "buy", item })).s === 400, item);
+    for (const type of ["research", "fuse"]) assert((await act(tok, { type, id: "cost10", slot: "Ring", r: 0 })).s === 400, type);
+    assert(q.cash === 1e12 + 0 || q.cash > 1e12 - 1, "nothing was charged");
+  });
+  await T("reset progress keeps the wallet, packs and $MINE; delete account is guarded", async () => {
+    const q = game.createPlayer("Resetter", "ResetWallet1111111111111111111111111111111"), tok = game.newSession(q);
+    game.touchPlayer(q); q.cash = 123456; q.balance = 777; q.earned = 500; q.packs[1] = true; q.hero.lvl = 40; q.q.spent = 99; q.mines.start.unlockedShaftCount = 9; q.pending.crates = 3;
+    assert((await act(tok, { type: "reset" })).s === 400 && q.hero.lvl === 40, "needs the confirmation word");
+    const r = await act(tok, { type: "reset", confirm: "RESET" });
+    assert(r.j.ok && r.j.hero.lvl === 1 && r.j.cash < 200 && r.j.mine.unlockedShaftCount === 1 && r.j.inv.length === 3 && r.j.pending.crates === 0, "game progress is wiped");
+    assert(q.balance === 777 && q.packs[1] && q.wallet === "ResetWallet1111111111111111111111111111111" && q.q.spent === 99 && q.earned === 500 && q.name === "Resetter", "$MINE, packs, wallet, name and quest progress stay");
+    const nope = await call("POST", "/api/account/delete", { confirm: "DELETE" }, tok);
+    assert(nope.s === 400 && /777|withdraw/i.test(nope.j.error) && game.db.players[q.id], "a wallet account that still holds $MINE can't be deleted");
+    assert((await call("POST", "/api/account/delete", {}, tok)).s === 400, "needs the confirmation word");
+    q.balance = 0;
+    assert((await call("POST", "/api/account/delete", { confirm: "DELETE" }, tok)).j.ok === true);
+    assert(!game.db.players[q.id] && game.findByWallet("ResetWallet1111111111111111111111111111111") === null, "gone, wallet released");
+    assert((await call("POST", "/api/sync", {}, tok)).s === 401, "its session is dead");
+    const gst = (await call("POST", "/api/guest", { name: "Temp" })).j;
+    assert((await call("POST", "/api/account/delete", { confirm: "DELETE" }, gst.token)).j.ok === true && !game.db.players[gst.id], "guests can delete freely");
+  });
+  await T("public stats: live reward pool, combined daily earnings, total and online players", async () => {
+    const st = (await call("GET", "/api/stats")).j;
+    assert(st.poolTotal === C.MINING_POOL && st.poolLeft <= st.poolTotal && st.poolLeft >= 0 && st.poolLeft + st.minedAll === st.poolTotal, JSON.stringify(st));
+    assert(st.players >= 10 && st.online >= 1 && st.online <= st.players && st.daily >= 0 && near(st.daily, st.perSec * 86400, 0.0001), JSON.stringify(st));
+    const q = game.createPlayer("Fresh"); game.touchPlayer(q);
+    const board = game.board(); assert(board.total === Object.keys(game.db.players).length);
+  });
+
   console.log("persistence & leaderboard & web security");
   await T("a restart keeps everything, including a withdrawal that was signed but not yet confirmed", async () => {
-    app.resetLimits(); const p = gp(); p.lastWithdrawAt = 0; p.withdrawLog = []; chain.wStatus = "pending";
+    app.resetLimits(); const p = gp(); p.lastWithdrawAt = 0; chain.wStatus = "pending";
     const wr = await call("POST", "/api/bank/withdraw", { amount: 150 }, gTok);
     assert(wr.s === 200, JSON.stringify(wr.j));
     await bank.processWithdrawals();

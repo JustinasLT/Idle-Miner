@@ -17,13 +17,16 @@ const sha = (s) => crypto.createHash("sha256").update(s).digest("hex");
 const intIn = (x, a, b, what = "value") => { if (!Number.isInteger(x) || x < a || x > b) bad("Invalid " + what); return x; };
 const cleanName = (s) => String(s || "").replace(/[^A-Za-z0-9 _.\-]/g, "").trim().replace(/\s+/g, " ").slice(0, 16);
 
-function createGame({ store, now: nowFn }) {
+function createGame({ store, now: nowFn, rng: rngOpt }) {
+  const upRoll = rngOpt || rng; // randomness of item upgrades (tests can inject their own)
   let clockOffset = 0;
   const now = nowFn || (() => Date.now() + clockOffset + (num(env.DEV_DAY_OFFSET, 0)) * DAY);
   const db = { season: null, players: {}, lastTick: 0, bonus: 0, withdrawals: {}, orders: {} };
+  let statsCache = { t: 0, v: null };
   const byWallet = new Map(), dirty = new Set();
   let metaDirty = false, boardCache = { t: 0, v: null };
   const touch = (p) => { if (p) dirty.add(p.id); boardCache.v = null; };
+  const BOOST_ITEMS = { boost_xp: "xp", boost_earn: "earn", boost_power: "power" };
   const touchMeta = () => { metaDirty = true; };
 
   // ---- persistence ------------------------------------------------------------------------------
@@ -36,8 +39,19 @@ function createGame({ store, now: nowFn }) {
     const legacy = Object.keys(db.players).filter((id) => !db.players[id].mines || !db.players[id].sessions);
     legacy.forEach((id) => delete db.players[id]);
     if (legacy.length) await store.removePlayers(legacy);
-    for (const p of Object.values(db.players)) if (p.wallet) byWallet.set(p.wallet, p);
+    for (const p of Object.values(db.players)) { migrate(p); if (p.wallet) byWallet.set(p.wallet, p); }
     if (!db.season) { db.season = { start: env.SEASON_START ? Date.parse(env.SEASON_START) : now() }; db.lastTick = now(); touchMeta(); }
+  }
+  // bring players saved by an older version up to date (research/forge/old boosts are gone, rewards are claimed, quests exist)
+  function migrate(p) {
+    const old = p.boosts || {};
+    p.boosts = { xp: old.xp || 0, earn: old.earn || 0, power: old.power || 0 };
+    delete p.researchUnlocked; delete p.freeMoneyAt; delete p.withdrawLog;
+    p.pending = p.pending || { items: [], crates: 0 };
+    p.claimMark = p.claimMark || { cash: p.stats.totalEarned, mine: p.earned, t: now() };
+    p.q = Object.assign({ deposited: 0, spent: 0, x: null, discord: null }, p.q);
+    p.lastWithdrawAt = p.lastWithdrawAt || 0;
+    p.inv.forEach((i) => { if (i.up == null) i.up = 0; });
   }
   async function flush() {
     if (!dirty.size && !metaDirty) return;
@@ -57,7 +71,11 @@ function createGame({ store, now: nowFn }) {
   // ---- players ------------------------------------------------------------------------------------
   const seasonEnd = () => db.season.start + C.SEASON_MS;
   const over = () => now() >= seasonEnd();
-  const isActive = (p, t) => p.power > 0 && t - p.lastSeen < C.ACTIVE_MS;
+  // Offline Earnings (all quests done): still earning up to 8 h after closing the game. Everybody else: 15 minutes.
+  const activeWindow = (p, t) => (S.offlineUnlocked(p, t) ? C.ACTIVE_MS : C.OFFLINE_FREE_MS);
+  const isActive = (p, t) => p.power > 0 && t - p.lastSeen < activeWindow(p, t);
+  // a player's weight in the split of the $MINE pool: hero power (x power boost) x earnings boost. The pool itself never grows.
+  const weight = (p, t) => p.power * S.powerMult(p, t) * S.earnMult(p, t);
   const isPaid = (p) => !!(p.packs && (p.packs[1] || p.packs[2] || p.packs[3]));
   const defaultMine = () => ({ prestigeMult: 1, warehouse: { level: 1 }, elevator: { level: 1 }, shafts: Array.from({ length: S.TOTAL_FLOORS }, () => ({ level: 1 })), unlockedShaftCount: 1 });
 
@@ -68,18 +86,25 @@ function createGame({ store, now: nowFn }) {
     while (taken(out)) out = n.slice(0, 12) + (++k > 9 ? Math.floor(Math.random() * 9000 + 1000) : k);
     return out;
   }
+  // everything that belongs to "the game progress" (what Reset progress wipes). Wallet, name, packs, $MINE balance,
+  // quest counters, boosts and the leaderboard history are NOT touched.
+  function freshProgress(p, t) {
+    Object.assign(p, {
+      cash: 50, mines: { start: defaultMine() }, stats: { totalEarned: 0 }, hero: { lvl: 1, xp: 0, pE: 0, pL: 0, n: 0, day: "", crates: 0 },
+      inv: [], eq: {}, nextId: 1, invPages: 1, pendingOffline: 0, wear: 0, items: 0, events: [], settledAt: t,
+      pending: { items: [], crates: 0 }, claimMark: { cash: 0, mine: p.earned || 0, t },
+    });
+    ["Pickaxe", "Shoes", "Helmet"].forEach((s) => { const it = genItem(p, 1, s, 0); p.inv.push(it); p.eq[s] = it.id; });
+    p.power = S.heroPower(p);
+  }
   function createPlayer(name, wallet) {
     const t = now(), id = crypto.randomBytes(6).toString("hex");
     const p = {
       id, sessions: [], wallet: wallet || null, name: uniqueName(name || "Miner" + Math.floor(1000 + Math.random() * 9000)),
-      created: t, lastSeen: t, settledAt: t, packs: {},
-      cash: 50, mines: { start: defaultMine() }, researchUnlocked: [], boosts: { elev: 0, mine: 0, sell: 0 },
-      stats: { totalEarned: 0 }, hero: { lvl: 1, xp: 0, pE: 0, pL: 0, n: 0, day: "", crates: 0 },
-      inv: [], eq: {}, nextId: 1, invPages: 1, pendingOffline: 0, freeMoneyAt: 0, wear: 0,
-      balance: 0, earned: 0, items: 0, claimed: false, power: 0, history: [], withdrawLog: [], lastWithdrawAt: 0, events: [],
+      created: t, lastSeen: t, packs: {}, boosts: { xp: 0, earn: 0, power: 0 }, q: { deposited: 0, spent: 0, x: null, discord: null },
+      balance: 0, earned: 0, claimed: false, history: [], lastWithdrawAt: 0,
     };
-    ["Pickaxe", "Shoes", "Helmet"].forEach((s) => { const it = genItem(p, 1, s, 0); p.inv.push(it); p.eq[s] = it.id; });
-    p.power = S.heroPower(p);
+    freshProgress(p, t);
     db.players[id] = p; if (wallet) byWallet.set(wallet, p);
     touch(p);
     return p;
@@ -114,8 +139,8 @@ function createGame({ store, now: nowFn }) {
   function addXp(p, x) {
     const h = p.hero;
     h.xp += x;
-    while (h.lvl < 100 && h.xp >= S.xpNeed(h.lvl)) { h.xp -= S.xpNeed(h.lvl); h.lvl++; evt(p, "Hero reached level " + h.lvl + "!"); }
-    if (h.lvl >= 100) h.xp = Math.min(h.xp, S.xpNeed(100));
+    while (h.lvl < S.HERO_MAX && h.xp >= S.xpNeed(h.lvl)) { h.xp -= S.xpNeed(h.lvl); h.lvl++; evt(p, "Hero reached level " + h.lvl + "!"); }
+    if (h.lvl >= S.HERO_MAX) h.xp = Math.min(h.xp, S.xpNeed(S.HERO_MAX));
   }
   function evt(p, text) { p.events.push(text); if (p.events.length > 20) p.events.shift(); }
 
@@ -135,7 +160,7 @@ function createGame({ store, now: nowFn }) {
     slot = slot || S.SLOTS[Math.floor(rng() * 8)];
     if (r == null) r = rollRarity(p, depth || 1);
     const R = S.RARITIES[r], f = 1 + 0.03 * (lvl - 1);
-    const it = { id: p.nextId++, slot, r, il: lvl, v: (S.SLOT_STAT[slot][2] / 100) * R.m * f * rnd(0.9, 1.1), dur: R.dur, max: R.dur, aff: [], lock: false };
+    const it = { id: p.nextId++, slot, r, il: lvl, v: (S.SLOT_STAT[slot][2] / 100) * R.m * f * rnd(0.9, 1.1), dur: R.dur, max: R.dur, aff: [], lock: false, up: 0 };
     const mk = (k) => it.aff.push({ k, v: (S.AFFIXES[k][1] / 100) * Math.sqrt(R.m) * f * rnd(0.9, 1.1) });
     if (slot === "Amulet") mk("drop");
     const pool = Object.keys(S.AFFIXES).filter((k) => k !== "drop" || slot !== "Amulet");
@@ -146,19 +171,31 @@ function createGame({ store, now: nowFn }) {
     }
     return it;
   }
-  function giveItem(p, it, where) {
+  // Items found while mining wait in p.pending until the player presses "Claim mining rewards".
+  function dropItem(p, it, where) {
     p.items++; // counts towards the leaderboard
+    if (p.pending.items.length >= C.PENDING_MAX) {
+      const v = S.sellValue(it); p.cash += v;
+      evt(p, "Rewards full — auto-sold " + S.itemName(it) + " for $" + Math.floor(v) + ". Claim your rewards!");
+      return;
+    }
+    p.pending.items.push(it);
+    evt(p, "✨ " + S.itemName(it) + " " + where);
+  }
+  // items that go straight into the backpack (opened crates)
+  function addToBackpack(p, it, where) {
+    p.items++;
     if (S.spareItems(p).length >= S.invCap(p)) {
       const v = S.sellValue(it); p.cash += v;
-      evt(p, "Backpack full — auto-sold " + S.RARITIES[it.r].n + " " + it.slot + " for $" + Math.floor(v));
+      evt(p, "Backpack full — auto-sold " + S.itemName(it) + " for $" + Math.floor(v));
       return;
     }
     p.inv.push(it);
-    evt(p, "✨ " + S.RARITIES[it.r].n + " " + it.slot + " " + where);
+    evt(p, "✨ " + S.itemName(it) + " " + where);
   }
   function autoEquip(p) {
     S.SLOTS.forEach((s) => {
-      const q = (i) => i.v * (i.dur ? 1 : 0.25);
+      const q = (i) => i.v * S.upMult(i) * (i.dur ? 1 : 0.25);
       const best = p.inv.filter((i) => i.slot === s && S.canEquip(p, i)).sort((x, y) => q(y) - q(x))[0];
       if (best) p.eq[s] = best.id;
     });
@@ -170,28 +207,33 @@ function createGame({ store, now: nowFn }) {
     if (!(gap > 0)) return;
     p.settledAt = t;
     const online = gap <= C.ONLINE_GRACE_MS;
-    const span = online ? gap : Math.min(gap, C.OFFLINE_MAX_MS); // never more than 8 hours of offline income
+    const unlocked = S.offlineUnlocked(p, t); // Offline Earnings: all quests finished
+    const span = online ? gap : Math.min(gap, unlocked ? C.OFFLINE_MAX_MS : C.OFFLINE_FREE_MS); // 8 h with the perk, else 15 min
     const t0 = t - gap, t1 = t0 + span;
     const cuts = [t0, t1];
-    for (const k of ["elev", "mine", "sell"]) { const e = p.boosts[k]; if (e > t0 && e < t1) cuts.push(e); }
+    for (const k of S.BOOST_KEYS) { const e = p.boosts[k]; if (e > t0 && e < t1) cuts.push(e); }
     cuts.sort((a, b) => a - b);
-    let cash = 0;
-    for (let i = 0; i + 1 < cuts.length; i++) cash += S.income(p, cuts[i]).perSec * ((cuts[i + 1] - cuts[i]) / 1000);
+    const c0 = S.ctx(p, t0);
+    let cash = 0, xp = 0;
+    for (let i = 0; i + 1 < cuts.length; i++) {
+      const sec = (cuts[i + 1] - cuts[i]) / 1000;
+      cash += S.income(p, cuts[i]).perSec * sec;
+      xp += sec * S.XP_PER_SEC * (1 + c0.fx.xp) * S.xpMult(p, cuts[i]);
+    }
     if (!(cash >= 0) || !isFinite(cash)) cash = 0;
     if (!online) {
-      const rm = S.ctx(p, t0).rm;
-      p.pendingOffline += cash * C.OFFLINE_CASH_RATE * rm.offlineMult;
+      p.pendingOffline += cash * (unlocked ? C.OFFLINE_CASH_RATE : 1);
       return;
     }
     p.cash += cash; p.stats.totalEarned += cash;
-    const dt = span / 1000, c = S.ctx(p, t0);
-    addXp(p, dt * 0.2 * (1 + c.fx.xp));
-    p.wear += (dt * (1 - c.fx.guard)) / 360; // 1 durability per 6 min
+    addXp(p, xp);
+    const dt = span / 1000;
+    p.wear += (dt * (1 - c0.fx.guard)) / 360; // 1 durability per 6 min
     if (p.wear >= 1) {
       const w = Math.floor(p.wear); p.wear -= w;
       for (const s of S.SLOTS) {
         const it = S.itemById(p, p.eq[s]);
-        if (it && it.dur > 0) { it.dur = Math.max(0, it.dur - w); if (it.dur === 0) evt(p, "💥 " + S.RARITIES[it.r].n + " " + it.slot + " broke!"); }
+        if (it && it.dur > 0) { it.dur = Math.max(0, it.dur - w); if (it.dur === 0) evt(p, "💥 " + S.itemName(it) + " broke!"); }
       }
     }
     rollDrops(p, t0, dt);
@@ -213,8 +255,8 @@ function createGame({ store, now: nowFn }) {
       let u = rng() * W, i = 0;
       for (; i < w.length - 1; i++) { if (u <= w[i]) break; u -= w[i]; }
       h.n++;
-      if (rng() < 0.25) { h.crates++; evt(p, "📦 Equipment crate found on floor " + (i + 1) + "!"); }
-      else giveItem(p, genItem(p, rollItemLevel(p), null, null, i + 1), "dropped on floor " + (i + 1) + "!");
+      if (rng() < 0.25) { p.pending.crates++; evt(p, "📦 Equipment crate found on floor " + (i + 1) + "!"); }
+      else dropItem(p, genItem(p, rollItemLevel(p), null, null, i + 1), "found on floor " + (i + 1) + "!");
     }
   }
 
@@ -227,10 +269,12 @@ function createGame({ store, now: nowFn }) {
     if (dt <= 0) return;
     const act = Object.values(db.players).filter((p) => isActive(p, upto));
     if (!act.length) return;
-    const G = act.reduce((s, p) => s + p.power, 0);
+    const wt = new Map(); let G = 0;
+    for (const p of act) { const x = weight(p, upto); wt.set(p.id, x); G += x; }
+    if (!(G > 0)) return;
     const pool = (C.DAILY * Math.min(1, act.length / C.FULL_PLAYERS) * dt) / 86400, cap = (C.DAILY * C.PLAYER_DAILY_CAP * dt) / 86400;
     for (const p of act) {
-      let g = Math.min((pool * p.power) / G, cap);
+      let g = Math.min((pool * wt.get(p.id)) / G, cap);
       if (upto - p.lastSeen <= C.ONLINE_GRACE_MS && p.earned < C.ONBOARD_CAP) { // fast start: the first 20 000 $MINE of an active player
         const fast = Math.min(C.ONBOARD_RATE * dt, C.ONBOARD_CAP - p.earned);
         if (fast > g) { db.bonus += fast - g; g = fast; }
@@ -250,12 +294,15 @@ function createGame({ store, now: nowFn }) {
   }
   function board() {
     if (boardCache.v && Date.now() - boardCache.t < 3000) return boardCache.v;
-    const t = now();
-    const ranked = Object.values(db.players).filter((p) => p.power > 0).map((p) => ({ p, pts: pointsOf(p) }))
+    const t = Math.min(now(), seasonEnd()), all = Object.values(db.players);
+    const ranked = all.filter((p) => p.power > 0).map((p) => ({ p, pts: pointsOf(p) }))
       .sort((a, b) => b.pts - a.pts || a.p.created - b.p.created);
     const rank = new Map(); ranked.forEach((r, i) => rank.set(r.p.id, i + 1));
-    const act = ranked.filter((r) => isActive(r.p, Math.min(t, seasonEnd())));
-    const v = { ranked, rank, players: act.length, global: act.reduce((s, r) => s + r.p.power, 0), minedAll: Object.values(db.players).reduce((s, p) => s + p.earned, 0) };
+    const act = ranked.filter((r) => isActive(r.p, t));
+    const w = new Map(); let globalW = 0;
+    for (const r of act) { const x = weight(r.p, t); w.set(r.p.id, x); globalW += x; }
+    const v = { ranked, rank, players: act.length, global: act.reduce((s, r) => s + r.p.power, 0), globalW, w,
+      minedAll: all.reduce((s, p) => s + p.earned, 0), total: all.length, online: all.filter((p) => now() - p.lastSeen < C.ONLINE_GRACE_MS).length };
     boardCache = { t: Date.now(), v };
     return v;
   }
@@ -268,25 +315,51 @@ function createGame({ store, now: nowFn }) {
   }
 
   // ---- what the client gets to see ------------------------------------------------------------------------------
+  // $MINE per second the server expects to pay this player right now (used for the live estimates)
+  function rateOf(p, t, b) {
+    if (over() || !isActive(p, t) || (!isPaid(p) && p.earned >= C.FREE_EARN_CAP) || !(b.globalW > 0)) return 0;
+    let r = Math.min(C.DAILY * Math.min(1, b.players / C.FULL_PLAYERS) * (weight(p, t) / b.globalW), C.DAILY * C.PLAYER_DAILY_CAP) / 86400;
+    if (p.earned < C.ONBOARD_CAP && t - p.lastSeen <= C.ONLINE_GRACE_MS) r = Math.max(r, C.ONBOARD_RATE);
+    return r;
+  }
+  // numbers for everybody: live reward pool, what all players together earn per day, player counts
+  function stats() {
+    if (statsCache.v && Date.now() - statsCache.t < 3000) return statsCache.v;
+    const b = board(), t = Math.min(now(), seasonEnd());
+    let perSec = 0;
+    for (const r of b.ranked) if (b.w.has(r.p.id)) perSec += rateOf(r.p, t, b);
+    const v = { poolTotal: C.MINING_POOL, poolLeft: Math.max(0, C.MINING_POOL - b.minedAll), minedAll: b.minedAll, perSec, daily: perSec * 86400,
+      players: b.total, online: b.online, active: b.players, over: over(), end: seasonEnd(), now: now() };
+    statsCache = { t: Date.now(), v };
+    return v;
+  }
   function mining(p) {
     const b = board(), rank = b.rank.get(p.id) || 0, t = Math.min(now(), seasonEnd());
-    const act = isActive(p, t), others = b.global - (act ? p.power : 0), players = b.players + (act ? 0 : 1);
-    const global = others + p.power, share = global ? p.power / global : 0;
+    const act = isActive(p, t), myW = weight(p, t);
+    const players = b.players + (act ? 0 : 1);
+    const G = b.globalW - (act ? b.w.get(p.id) || 0 : 0) + myW, share = G ? myW / G : 0;
+    const global = b.global - (act ? p.power : 0) + p.power;
     const perDay = over() ? 0 : Math.min(C.DAILY * Math.min(1, players / C.FULL_PLAYERS) * share, C.DAILY * C.PLAYER_DAILY_CAP);
     const capped = !isPaid(p) && p.earned >= C.FREE_EARN_CAP;
     const onboarding = p.earned < C.ONBOARD_CAP && !capped;
     let perSec = capped || over() ? 0 : perDay / 86400;
     if (onboarding && !over()) perSec = Math.max(perSec, C.ONBOARD_RATE);
-    return { rank, prize: rank ? prizeFor(rank) : 0, pts: pointsOf(p), global, players, perDay, perSec, share, minedAll: b.minedAll, capped, onboarding };
+    return { rank, prize: rank ? prizeFor(rank) : 0, pts: pointsOf(p), global, players, perDay, perSec, share, minedAll: b.minedAll, capped, onboarding,
+      powerMult: S.powerMult(p, t), boostedPower: p.power * S.powerMult(p, t) };
   }
+  const pendingView = (p) => ({ n: p.pending.items.length, crates: p.pending.crates, items: p.pending.items.map((i) => [i.slot, i.r, i.il]),
+    cash: Math.max(0, p.stats.totalEarned - p.claimMark.cash), mine: Math.max(0, p.earned - p.claimMark.mine), since: p.claimMark.t, max: C.PENDING_MAX });
   function view(p) {
     const t = now(), inc = S.income(p, t), m = p.mines.start;
     const out = {
       serverNow: t, id: p.id, name: p.name, wallet: p.wallet, guest: !p.wallet, packs: p.packs, paid: isPaid(p),
       cash: p.cash, balance: p.balance, earned: p.earned, totalEarned: p.stats.totalEarned, claimed: !!p.claimed,
       mine: { prestigeMult: m.prestigeMult, warehouse: m.warehouse, elevator: m.elevator, shafts: m.shafts.map((s) => ({ level: s.level })), unlockedShaftCount: m.unlockedShaftCount },
-      researchUnlocked: p.researchUnlocked, boosts: p.boosts, hero: p.hero, inv: p.inv, eq: p.eq, invPages: p.invPages, items: p.items,
-      pendingOffline: p.pendingOffline, freeMoneyIn: Math.max(0, p.freeMoneyAt + C.FREE_MONEY_COOLDOWN_MS - t),
+      boosts: p.boosts, hero: p.hero, inv: p.inv, eq: p.eq, invPages: p.invPages, items: p.items,
+      pendingOffline: p.pendingOffline, pending: pendingView(p), devFaucet: C.DEV_FAUCET,
+      quests: S.questStates(p, t), social: { x: p.q.x, discord: p.q.discord },
+      earnBoost: { quest: S.questBoost(p, t), total: S.earnBoost(p, t) },
+      offline: { unlocked: S.offlineUnlocked(p, t), freeMin: C.OFFLINE_FREE_MS / 60000, maxHours: C.OFFLINE_MAX_MS / 3600e3 },
       power: p.power, cashPerSec: inc.perSec, season: seasonInfo(), mining: mining(p),
       free: { cap: C.FREE_EARN_CAP, onboardCap: C.ONBOARD_CAP, earned: p.earned },
       events: p.events,
@@ -306,6 +379,7 @@ function createGame({ store, now: nowFn }) {
   function spendMine(p, amount) {
     if (p.balance < amount) bad("Not enough $MINE");
     p.balance -= amount;
+    p.q.spent += amount; // counts towards the "Spend 25,000 $MINE" quest
   }
   function addHistory(p, h) { p.history.unshift({ t: now(), ...h }); if (p.history.length > 40) p.history.length = 40; }
 
@@ -315,7 +389,7 @@ function createGame({ store, now: nowFn }) {
     addXp(p, pack.xp);
     p.cash += pack.cash;
     p.hero.crates += pack.crates;
-    for (const s of S.SLOTS) p.inv.push(genItem(p, p.hero.lvl, s, pack.gearRarity));
+    for (const s of pack.slots) p.inv.push(genItem(p, p.hero.lvl, s, pack.gearRarity));
     autoEquip(p);
     p.power = S.heroPower(p);
     addHistory(p, { type: "pack", pack: pack.id, how });
@@ -323,17 +397,6 @@ function createGame({ store, now: nowFn }) {
     touch(p);
   }
 
-  const SHOP_CASH = {
-    boost_mine: { cost: (m) => 1500 * S.shopScale(m), fn: (p, t) => boost(p, "mine", 3, t) },
-    crate: { cost: (m) => 3000 * S.shopScale(m), fn: (p) => { p.hero.crates++; } },
-    shaft5: { cost: (m) => 5000 * S.shopScale(m), fn: (p) => { const m = p.mines.start; for (let i = 0; i < m.unlockedShaftCount; i++) m.shafts[i].level += 5; } },
-    infra5: { cost: (m) => 8000 * S.shopScale(m), fn: (p) => { const m = p.mines.start; m.elevator.level += 5; m.warehouse.level += 5; } },
-  };
-  const SHOP_TOKEN = {
-    boost_sell: { cost: PRICES.boost_sell, fn: (p, t) => boost(p, "sell", 5, t) },
-    boost_elev: { cost: PRICES.boost_elev, fn: (p, t) => boost(p, "elev", 5, t) },
-    tome: { cost: PRICES.tome, fn: (p) => addXp(p, C.TOME_XP) },
-  };
   const boost = (p, k, mins, t) => { p.boosts[k] = Math.max(t, p.boosts[k]) + mins * 60000; };
 
   const ACTIONS = {
@@ -357,13 +420,6 @@ function createGame({ store, now: nowFn }) {
       if (!(p.cash >= cost)) bad("Not enough cash");
       p.cash -= cost; m.unlockedShaftCount++;
     },
-    research(p, b) {
-      const node = S.RESEARCH_NODES.find((n) => n.id === b.id);
-      if (!node) bad("Unknown research");
-      if (p.researchUnlocked.includes(node.id)) bad("Already researched");
-      if (!(p.cash >= node.cost)) bad("Not enough cash");
-      p.cash -= node.cost; p.researchUnlocked.push(node.id);
-    },
     prestige(p) {
       const m = p.mines.start;
       if (m.shafts.reduce((s, sh) => s + sh.level, 0) + m.warehouse.level + m.elevator.level < 50) bad("Reach 50+ total levels to Prestige");
@@ -373,27 +429,66 @@ function createGame({ store, now: nowFn }) {
     },
     buy(p, b, t) {
       const key = String(b.item);
-      if (key === "free_money") {
-        if (t < p.freeMoneyAt + C.FREE_MONEY_COOLDOWN_MS) bad("Free money is on cooldown");
-        const amt = Math.max(10000, p.stats.totalEarned * 0.5 + 5000);
-        p.cash += amt; p.freeMoneyAt = t;
-      } else if (SHOP_CASH[key]) {
-        const it = SHOP_CASH[key], cost = it.cost(p.mines.start);
-        if (!(p.cash >= cost)) bad("Not enough cash");
-        p.cash -= cost; it.fn(p, t);
-      } else if (SHOP_TOKEN[key]) {
-        spendMine(p, SHOP_TOKEN[key].cost); SHOP_TOKEN[key].fn(p, t);
+      if (key === "free_money" || key === "free_mine") { // test faucet, no cooldown (turn it off with DEV_FAUCET=off)
+        if (!C.DEV_FAUCET) bad("The test faucet is turned off on this server");
+        if (key === "free_money") p.cash += Math.max(10000, p.stats.totalEarned * 0.5 + 5000);
+        else p.balance += C.DEV_MINE_AMOUNT;
+      } else if (Object.prototype.hasOwnProperty.call(BOOST_ITEMS, key)) {
+        const k = BOOST_ITEMS[key], left = Math.max(0, p.boosts[k] - t);
+        if (left + S.BOOST_MINUTES * 60000 > S.BOOST_MAX_MS) bad("That boost is already stacked to the maximum (12 h)");
+        spendMine(p, PRICES[key]); boost(p, k, S.BOOST_MINUTES, t);
       } else if (key === "page") {
         if (p.invPages >= C.MAX_PAGES) bad("All pages unlocked");
         spendMine(p, S.PAGE_COST[p.invPages]); p.invPages++;
       } else bad("Unknown item");
     },
-    claimOffline(p, b) {
+    claimOffline(p) {
       const amt = p.pendingOffline;
       if (!(amt > 0)) bad("Nothing to collect");
-      const mult = b.double ? 2 : 1;
-      if (b.double) spendMine(p, PRICES.offline2);
-      p.cash += amt * mult; p.stats.totalEarned += amt * mult; p.pendingOffline = 0;
+      p.cash += amt; p.stats.totalEarned += amt; p.pendingOffline = 0;
+    },
+    // everything the mine found since the last claim goes into the backpack / crate stock now
+    claimRewards(p, b, t) {
+      const pend = p.pending;
+      if (!pend.items.length && !pend.crates) bad("Nothing to claim yet");
+      let free = S.invCap(p) - S.spareItems(p).length, moved = 0;
+      pend.items.sort((x, y) => y.r - x.r || y.il - x.il || x.id - y.id);
+      const rest = [];
+      for (const it of pend.items) { if (free > 0) { p.inv.push(it); free--; moved++; } else rest.push(it); }
+      const res = { items: moved, crates: pend.crates, left: rest.length };
+      p.hero.crates += pend.crates;
+      pend.items = rest; pend.crates = 0;
+      p.claimMark = { cash: p.stats.totalEarned, mine: p.earned, t };
+      return { claimed: res };
+    },
+    upgradeItem(p, b) {
+      const it = S.itemById(p, b.id);
+      if (!it) bad("No such item");
+      const info = S.upgradeInfo(it, p.mines.start);
+      if (info.maxed) bad("This item is already +" + S.UP_MAX);
+      if (!(p.cash >= info.cash)) bad("Not enough cash");
+      if (info.mine) spendMine(p, info.mine); // throws "Not enough $MINE" before anything is taken
+      p.cash -= info.cash;
+      const ok = upRoll() < info.chance;
+      if (ok) { it.up = info.next; evt(p, "⬆ " + S.itemName(it) + " — upgrade succeeded!"); }
+      else evt(p, "💥 Upgrade failed — " + S.itemName(it) + " is unchanged");
+      return { upgrade: { ok, up: it.up || 0, chance: info.chance, name: S.itemName(it) } };
+    },
+    // X / Discord for the "Link X and Discord" quest. Unverified (no OAuth): the name only has to look valid and be unused.
+    linkSocial(p, b) {
+      const kind = b.kind;
+      if (kind !== "x" && kind !== "discord") bad("Unknown account type");
+      if (p.q[kind]) bad("Already linked");
+      let h = String(b.handle || "").trim();
+      if (kind === "x") { h = h.replace(/^@/, ""); if (!/^[A-Za-z0-9_]{1,15}$/.test(h)) bad("Enter your X handle (1-15 letters, numbers or _)"); }
+      else if (!/^[A-Za-z0-9_.]{2,32}(#\d{4})?$/.test(h)) bad("Enter your Discord username (2-32 letters, numbers, _ or .)");
+      if (Object.values(db.players).some((o) => o.id !== p.id && o.q && String(o.q[kind] || "").toLowerCase() === h.toLowerCase())) bad("That account is already linked to another player");
+      p.q[kind] = h;
+    },
+    // wipes the game progress only: wallet, name, packs, $MINE balance, boosts and quest progress stay
+    reset(p, b, t) {
+      if (b.confirm !== "RESET") bad("Confirmation missing");
+      freshProgress(p, t);
     },
     equip(p, b) {
       const it = S.itemById(p, b.id);
@@ -411,8 +506,8 @@ function createGame({ store, now: nowFn }) {
       p.cash += S.sellValue(it); p.inv = p.inv.filter((i) => i !== it);
     },
     sellAll(p) {
-      const list = S.spareItems(p).filter((i) => !i.lock && i.r <= 2);
-      if (!list.length) bad("Nothing to sell — Epic+ and locked items are kept");
+      const list = S.spareItems(p).filter((i) => !i.lock && !i.up && i.r <= 2);
+      if (!list.length) bad("Nothing to sell — Epic+, upgraded and locked items are kept");
       for (const it of list) p.cash += S.sellValue(it);
       const gone = new Set(list);
       p.inv = p.inv.filter((i) => !gone.has(i));
@@ -425,24 +520,11 @@ function createGame({ store, now: nowFn }) {
       repairList(p, [it]);
     },
     repairAll(p) { repairList(p, p.inv.filter((i) => i.dur < i.max)); },
-    fuse(p, b) {
-      const slot = b.slot, r = intIn(b.r, 0, 4, "rarity");
-      if (!S.SLOTS.includes(slot)) bad("Invalid slot");
-      const m = p.mines.start, [need, ok] = S.FUSE[r], cost = S.fuseCost(r, m);
-      const pool = p.inv.filter((i) => i.slot === slot && i.r === r && !i.lock && p.eq[slot] !== i.id).slice(0, need);
-      if (pool.length < need) bad("Not enough items to fuse");
-      if (!(p.cash >= cost)) bad("Need $" + cost + " to fuse");
-      p.cash -= cost;
-      const gone = new Set(pool);
-      p.inv = p.inv.filter((i) => !gone.has(i));
-      if (rng() < ok) { p.inv.push(genItem(p, Math.round(pool.reduce((s, i) => s + i.il, 0) / need), slot, r + 1)); evt(p, "🔥 Fused a " + S.RARITIES[r + 1].n + " " + slot + "!"); }
-      else { p.inv.push(pool[Math.floor(rng() * need)]); evt(p, "Fusion failed — one item returned"); }
-    },
     crate(p, b) {
       if (!S.SLOTS.includes(b.slot)) bad("Invalid slot");
       if (p.hero.crates < 1) bad("No crates");
       p.hero.crates--;
-      giveItem(p, genItem(p, rollItemLevel(p), b.slot, null, p.mines.start.unlockedShaftCount), "from the crate!");
+      addToBackpack(p, genItem(p, rollItemLevel(p), b.slot, null, p.mines.start.unlockedShaftCount), "from the crate!");
     },
     rename(p, b) {
       const n = cleanName(b.name);
@@ -477,6 +559,16 @@ function createGame({ store, now: nowFn }) {
     return res;
   }
 
+  // permanently delete an account. A wallet account that still holds $MINE must withdraw/spend it first (nothing is ever destroyed silently).
+  async function deleteAccount(p) {
+    if (p.wallet && p.balance >= 1) bad("You still hold " + Math.floor(p.balance) + " $MINE — withdraw or spend it first");
+    if (Object.values(db.withdrawals).some((w) => w.pid === p.id && (w.state === "queued" || w.state === "signed" || w.state === "sent"))) bad("A withdrawal is still in progress — try again when it has finished");
+    delete db.players[p.id];
+    if (p.wallet && byWallet.get(p.wallet) === p) byWallet.delete(p.wallet);
+    dirty.delete(p.id); boardCache.v = null; statsCache = { t: 0, v: null };
+    await store.removePlayers([p.id]);
+  }
+
   // housekeeping: forget abandoned guest accounts (no wallet, no money in, 45 days idle)
   function prune() {
     const t = now(), gone = [];
@@ -491,7 +583,7 @@ function createGame({ store, now: nowFn }) {
   return {
     db, C, S, now, saveNow, store, setClock: (ms) => { clockOffset = ms; }, load, flush, touch, touchMeta, metaDirty: () => metaDirty,
     createPlayer, findByWallet, linkWallet, newSession, authToken, dropSession, uniqueName, cleanName,
-    touchPlayer, settle, tick, view, act, leaderboard, board, mining, grantPack, spendMine, addHistory, evt,
+    touchPlayer, settle, tick, view, act, leaderboard, board, mining, stats, deleteAccount, grantPack, spendMine, addHistory, evt,
     isPaid, isActive, over, seasonEnd, prune, ApiError, bad, intIn, rng, ACTIONS, PACKS, SOL,
   };
 }
