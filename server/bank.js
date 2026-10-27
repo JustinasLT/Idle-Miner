@@ -186,8 +186,8 @@ function createBank(game, chain) {
       if (p.packs[pack.id]) bad("You already own this pack");
       game.touchPlayer(p);
       game.spendMine(p, pack.mine);
-      game.grantPack(p, pack, "mine");
-      await game.saveNow([p]);
+      const ref = game.grantPack(p, pack, "mine");    // returns the referrer who got their 25 % (saved in the same write)
+      await game.saveNow([p, ref].filter(Boolean));
       return { pack: pack.id };
     });
   }
@@ -219,9 +219,9 @@ function createBank(game, chain) {
         if (r.status === "pending") return { status: "pending" };
         if (r.status === "error") bad(r.error);
         o.done = true; o.sig = sig;
-        game.grantPack(p, pack, "sol");
+        const ref = game.grantPack(p, pack, "sol");
         game.touchMeta();
-        const ok = await game.saveNow([p], { sig, info: { pid: p.id, kind: "pack", pack: pack.id, order: o.id, at: Date.now() } });
+        const ok = await game.saveNow([p, ref].filter(Boolean), { sig, info: { pid: p.id, kind: "pack", pack: pack.id, order: o.id, at: Date.now() } });
         if (!ok) console.error("signature was already claimed while granting", sig);
         return { status: "ok", pack: pack.id };
       } finally { inflight.delete(sig); }

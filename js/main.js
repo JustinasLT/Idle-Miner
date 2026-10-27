@@ -1,6 +1,6 @@
 "use strict";
 let lastTick = performance.now();
-const PANELS = { hero: () => renderHero(), ranks: () => renderRanks(), packs: () => renderPacks(), bank: () => renderBank(), shop: () => renderShop() };
+const PANELS = { hero: () => renderHero(), ranks: () => renderRanks(), packs: () => renderPacks(), bank: () => renderBank(), shop: () => renderShop(), events: () => {} };
 function setupNav() {
   document.querySelectorAll(".nav-btn").forEach((btn) => btn.addEventListener("click", () => {
     document.querySelectorAll(".nav-btn").forEach((b) => b.classList.remove("active"));
@@ -45,7 +45,7 @@ function init() {
   $("hero-content").addEventListener("click", heroClick);
   $("dyn-modal").addEventListener("click", (e) => { if (e.target.id === "dyn-modal") closeModal(); });
   buildShafts();
-  setupNav(); setupPrestige(); setupRanks(); setupLogin(); setupPacks(); setupBank(); setupEarn(); Sound.init();
+  setupNav(); setupPrestige(); setupRanks(); setupLogin(); setupPacks(); setupBank(); setupEarn(); setupQuests(); Sound.init();
   document.querySelectorAll("[data-upgrade]").forEach((b) => (b.onclick = () => openUpgrade(b.dataset.upgrade)));
   $("scroll-up").onclick = () => $("world-scroll").scrollBy({ top: -240, behavior: "smooth" });
   $("scroll-down").onclick = () => $("world-scroll").scrollBy({ top: 240, behavior: "smooth" });

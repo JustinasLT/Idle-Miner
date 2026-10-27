@@ -4,13 +4,14 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
   <title>Idle Mountain Miner — Dig Deep, Get Rich!</title>
-  <meta name="description" content="An idle mining tycoon game. Dig deep, gear up your hero, upgrade shafts and become the richest miner!" />
+  <meta name="description" content="An idle mining tycoon game. Dig deep, gear up your manager, upgrade shafts and become the richest miner!" />
   <link rel="stylesheet" href="css/base.css" />
   <link rel="stylesheet" href="css/world.css" />
   <link rel="stylesheet" href="css/panels.css" />
   <link rel="stylesheet" href="css/inventory.css" />
   <link rel="stylesheet" href="css/account.css" />
   <link rel="stylesheet" href="css/features.css" />
+  <link rel="stylesheet" href="css/extras.css" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Nunito:wght@600;700;800;900&display=swap" rel="stylesheet" />
@@ -31,6 +32,7 @@
       </div>
       <div class="hud-center">
         <div class="prestige-badge" id="prestige-badge" hidden><span>⭐</span><span>×<span id="prestige-mult">1</span></span></div>
+        <div class="shard-chip" id="shard-chip" hidden title="Mine Shards — open the Manager tab → BAG"><span>💠</span><b id="shard-count">0</b></div>
         <div class="boost-chips" id="boost-chips"></div>
       </div>
       <div class="hud-right">
@@ -96,15 +98,22 @@
           <section class="mines" id="zone-mines"><div id="shafts-container"></div></section>
         </div>
       </div>
-      <div class="tput" id="tput">
-        <div class="tp-row" id="tp-mine"><i></i><span>Mine</span><em></em></div>
-        <div class="tp-row" id="tp-elev"><i></i><span>Elevator</span><em></em></div>
-        <div class="tp-row" id="tp-wh"><i></i><span>Warehouse</span><em></em></div>
+      <button type="button" class="tput-btn" id="tput-btn" title="Income per minute">📊<span>$/min</span></button>
+      <div class="tput hidden" id="tput">
+        <div class="tput-head"><b>📊 Income per minute</b><button type="button" class="tput-x" id="tput-x" title="Close">✕</button></div>
+        <div class="tp-row" id="tp-mine"><i class="tp-ico">⛏️</i><div class="tp-main"><span>Mines</span><div class="tp-bar"><u></u></div></div><em></em></div>
+        <div class="tp-row" id="tp-elev"><i class="tp-ico">🛗</i><div class="tp-main"><span>Elevator</span><div class="tp-bar"><u></u></div></div><em></em></div>
+        <div class="tp-row" id="tp-wh"><i class="tp-ico">🏭</i><div class="tp-main"><span>Warehouse</span><div class="tp-bar"><u></u></div></div><em></em></div>
+        <div class="tput-note" id="tput-note"></div>
       </div>
-      <div class="bottleneck-warning" id="bottleneck" hidden><span id="bn-text"></span></div>
+      <div class="bottleneck-warning" id="bottleneck" hidden><span id="bn-text"></span><button type="button" id="bn-x" title="Hide for 10 minutes">✕</button></div>
       <div class="mine-actions" id="mine-actions">
         <button type="button" class="mine-act earn" id="btn-earn"><i>🚀</i><span><b>Earnings Boost <em id="earn-pct">+0%</em></b><small id="earn-sub">0/5 quests</small></span></button>
         <button type="button" class="mine-act claim" id="btn-claim"><i>🎁</i><span><b>Claim mining rewards</b><small id="claim-sub">nothing new yet</small></span><u id="claim-badge" hidden>0</u></button>
+        <div class="mine-mini">
+          <button type="button" class="mine-act mini daily" id="btn-daily"><i>📅</i><span><b>Daily</b><small id="daily-sub">Day 1</small></span><u id="daily-badge" hidden>!</u></button>
+          <button type="button" class="mine-act mini quests" id="btn-quests"><i>📜</i><span><b>Quests</b><small id="quests-sub">0/4</small></span><u id="quests-badge" hidden>0</u></button>
+        </div>
       </div>
     </main>
 
@@ -115,11 +124,12 @@
 
     <nav class="bottom-nav">
       <button type="button" class="nav-btn active" data-panel="mine">⛏️<span>Mine</span></button>
-      <button type="button" class="nav-btn" data-panel="hero">🎒<span>Hero</span></button>
+      <button type="button" class="nav-btn" data-panel="hero">🎒<span>Manager</span></button>
       <button type="button" class="nav-btn" data-panel="ranks">🏆<span>Ranks</span></button>
       <button type="button" class="nav-btn" data-panel="packs">📦<span>Packs</span></button>
       <button type="button" class="nav-btn" data-panel="shop">🛒<span>Shop</span></button>
       <button type="button" class="nav-btn" data-panel="bank">🏦<span>Bank</span></button>
+      <button type="button" class="nav-btn" data-panel="events">🎉<span>Events</span></button>
     </nav>
 
     <aside class="side-panel hidden" id="panel-hero"><div id="hero-content"></div></aside>
@@ -129,8 +139,12 @@
       <div id="packs-content"></div>
     </aside>
     <aside class="side-panel hidden" id="panel-shop">
-      <div class="panel-header"><h2>🛒 Shop</h2><p class="hint">Boosts last 2 hours and are bought with $MINE.</p></div>
+      <div class="panel-header"><h2>🛒 Shop</h2><p class="hint">Boosts are bought with $MINE and go into your bag (Manager → BAG). Use them when you want — each lasts 2 hours.</p></div>
       <div id="shop-list"></div>
+    </aside>
+    <aside class="side-panel hidden" id="panel-events">
+      <div class="panel-header"><h2>🎉 Events</h2><p class="hint">Limited-time events with special rewards.</p></div>
+      <div class="coming-soon big"><span>🎉</span><b>Events</b><small>COMING SOON</small></div>
     </aside>
     <aside class="side-panel hidden" id="panel-bank">
       <div class="panel-header"><h2>🏦 Bank</h2><p class="hint">Move $MINE between your wallet and the game.</p></div>
@@ -140,7 +154,7 @@
     <div class="overlay hidden" id="offline-modal"><div class="modal"><div class="modal-glow"></div>
       <h2>⛏️ Welcome Back!</h2><p>Your miners kept working while you were away.</p>
       <p class="offline-earn">+<span id="offline-amount">0</span></p>
-      <p class="offline-mine" id="offline-mine" hidden></p>
+      <div class="offline-list" id="offline-list"></div>
       <p class="small dim" id="offline-note"></p>
       <div class="modal-actions"><button type="button" class="btn-primary" id="btn-claim-offline">Collect</button></div></div></div>
     <div class="overlay hidden" id="prestige-modal"><div class="modal"><div class="modal-glow prestige-glow"></div>
@@ -186,6 +200,7 @@
   <script src="js/earn.js"></script>
   <script src="js/settings.js"></script>
   <script src="js/panels.js"></script>
+  <script src="js/quests.js"></script>
   <script src="js/packs.js"></script>
   <script src="js/bank.js"></script>
   <script src="js/login.js"></script>

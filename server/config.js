@@ -21,6 +21,11 @@ const C = {
   ONBOARD_CAP: 20000,                // the first 20 000 $MINE of every player are paid at the fast rate...
   ONBOARD_MINUTES: 90,               // ...which finishes in about 90 minutes of active play
   DEV_MINE_AMOUNT: 10000,            // $MINE given by the test faucet in the shop (see DEV_FAUCET below)
+  // --- referrals ---
+  // A referrer gets REF_RATE of what a referred player spends on packs, paid in $MINE to the referrer's game balance.
+  // (SOL purchases are valued at SOL price x MINE_PER_SOL; $MINE purchases at the $MINE price.)
+  REF_RATE: num(env.REF_RATE, 0.25),
+  REF_BOARD_SIZE: 100,               // rows on the referral leaderboard
 };
 C.SEASON_MS = C.SEASON_DAYS * 864e5;
 C.DAILY = C.MINING_POOL / C.SEASON_DAYS;
@@ -55,12 +60,12 @@ C.DEV_FAUCET = env.DEV_FAUCET ? env.DEV_FAUCET === "on" : cluster !== "mainnet-b
 // ---- Packs (each can be bought once, with SOL or $MINE) ----------------------------------------
 // Prices are set in SOL; paying in $MINE is 10 % cheaper (price = sol * MINE_PER_SOL * 0.9, rounded to 500 $MINE).
 // gear: `pieces` slots (in the order of `slots`) get an item of rarity `gearRarity` (2 Rare, 3 Epic, 4 Legendary),
-// item level = hero level after the XP. The packs are a head start, not a shortcut: a full hero (Lv 100) still takes ~15 days.
+// item level = hero level after the XP. The packs are a head start, not a shortcut: a full manager (Lv 100) still takes ~15 days.
 const SLOTS_ALL = ["Pickaxe", "Helmet", "Shoes", "Gloves", "Shirt", "Pants", "Amulet", "Ring"];
 const PACKS = [
-  { id: 1, name: "Prospector", sol: 0.05, cash: 25e3, xp: 500, crates: 1, gearRarity: 2, slots: SLOTS_ALL.slice(0, 4), blurb: "4 Rare gear pieces, $25K cash, +500 hero XP, 1 crate" },
-  { id: 2, name: "Foreman", sol: 0.15, cash: 1.5e6, xp: 2000, crates: 3, gearRarity: 3, slots: SLOTS_ALL.slice(0, 6), blurb: "6 Epic gear pieces, $1.5M cash, +2,000 hero XP, 3 crates" },
-  { id: 3, name: "Tycoon", sol: 0.4, cash: 75e6, xp: 6000, crates: 6, gearRarity: 4, slots: SLOTS_ALL, blurb: "8 Legendary gear pieces, $75M cash, +6,000 hero XP, 6 crates" },
+  { id: 1, name: "Prospector", sol: 0.05, cash: 25e3, xp: 500, crates: 1, gearRarity: 2, slots: SLOTS_ALL.slice(0, 4), blurb: "4 Rare gear pieces, $25K cash, +500 manager XP, 1 crate" },
+  { id: 2, name: "Foreman", sol: 0.15, cash: 1.5e6, xp: 2000, crates: 3, gearRarity: 3, slots: SLOTS_ALL.slice(0, 6), blurb: "6 Epic gear pieces, $1.5M cash, +2,000 manager XP, 3 crates" },
+  { id: 3, name: "Tycoon", sol: 0.4, cash: 75e6, xp: 6000, crates: 6, gearRarity: 4, slots: SLOTS_ALL, blurb: "8 Legendary gear pieces, $75M cash, +6,000 manager XP, 6 crates" },
 ];
 for (const p of PACKS) {
   p.lamports = Math.round(p.sol * 1e9);

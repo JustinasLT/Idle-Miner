@@ -1,6 +1,7 @@
 "use strict";
 const bnText = $("bn-text"), elCable = $("elevator-cable"), hfWheel = $("hf-wheel");
 let slowN = 0;
+const bnDismissed = { kind: null, until: 0 };
 const BOOST_LABEL = { xp: "📖 XP +100%", earn: "💰 Earnings +50%", power: "⚡ Power +100%" };
 
 function renderHUD() {
@@ -21,6 +22,9 @@ function renderHUD() {
   }).join("");
   const bc = $("boost-chips");
   if (bc._h !== chips) { bc.innerHTML = chips; bc._h = chips; }
+  const sh = (state.bag && state.bag.shards) || 0;
+  $("shard-chip").hidden = sh < 1 && !(state.pending && state.pending.shards);
+  setText($("shard-count"), String(sh));
   updateUpgradeCosts();
 }
 function updateUpgradeCosts() {
@@ -42,8 +46,11 @@ function renderGameVisuals(mine) {
     const f = floorUI[i];
     if (f) setText(f.boxVal, formatMoney(mine.shafts[i].stock * unitValue(i, mine)));
   }
-  bnEl.hidden = !bottleneck;
-  if (bottleneck) setText(bnText, bottleneck === "elevator" ? "⚠️ Elevator bottleneck — upgrade it!" : "⚠️ Warehouse bottleneck — upgrade it!");
+  // the warning is a small pill; ✕ hides that kind of warning for 10 minutes
+  const hidden = !bottleneck || (bnDismissed.kind === bottleneck && Date.now() < bnDismissed.until);
+  bnEl.hidden = hidden;
+  if (bottleneck) setText(bnText, bottleneck === "elevator" ? "⚠️ Elevator bottleneck" : "⚠️ Warehouse bottleneck");
+  $("tput-btn").classList.toggle("warn", !!bottleneck && hidden);
 }
 // slow refresh (4x/sec): labels, costs, miner counts
 function refreshFloors(mine) {
@@ -57,7 +64,11 @@ function refreshFloors(mine) {
     setText(f.cost, formatMoney(c1));
     f.btn.classList.toggle("poor", state.cash < c1);
   }
-  if (floorUI.unlockBtn) floorUI.unlockBtn.classList.toggle("poor", state.cash < shaftUnlockCost(mine.unlockedShaftCount));
+  if (floorUI.unlockBtn) {
+    const c = nextFloorCost(mine), b = floorUI.unlockBtn, no = [state.cash < c.cash, c.mine && state.token < c.mine, c.shards && (state.bag.shards || 0) < c.shards];
+    b.classList.toggle("poor", no.some(Boolean));
+    ["ca", "mi", "sh"].forEach((k, n) => { const el = b.querySelector("." + k); if (el) el.classList.toggle("bad", !!no[n]); });
+  }
 }
 // throughput bars (cash/min) make the bottleneck visible at a glance
 function updateHeroVisuals(mine) {
@@ -68,13 +79,17 @@ function updateHeroVisuals(mine) {
   const cycle = (2 * n) / ((1.4 + 0.15 * mine.elevator.level) * elevatorBuff()) + n * elevatorStop(mine);
   const vals = [V * 60, (elevatorCapacity(mine.elevator.level) / cycle) * avg * 60,
     warehouseSellRate(mine.warehouse.level) * hmult.c * avg * 60];
-  const mx = Math.max(...vals, 1), lo = Math.min(...vals);
-  ["mine", "elev", "wh"].forEach((id, k) => {
-    const row = $("tp-" + id);
-    row.firstChild.style.width = Math.min(100, (vals[k] / mx) * 100) + "%";
-    row.classList.toggle("low", vals[k] === lo && vals[k] < mx * 0.98);
-    setText(row.lastChild, formatMoney(vals[k]) + "/min");
-  });
+  const mx = Math.max(...vals, 1), lo = Math.min(...vals), limiting = vals[1] === lo ? 1 : vals[2] === lo ? 2 : 0;
+  if (!$("tput").classList.contains("hidden")) { // only worth drawing while the panel is open
+    ["mine", "elev", "wh"].forEach((id, k) => {
+      const row = $("tp-" + id), bar = row.querySelector("u");
+      bar.style.width = Math.min(100, (vals[k] / mx) * 100) + "%";
+      row.classList.toggle("low", vals[k] === lo && vals[k] < mx * 0.98);
+      setText(row.querySelector("em"), formatMoney(vals[k]));
+    });
+    const weak = lo < mx * 0.98;
+    setText($("tput-note"), weak ? "Limited by the " + ["mines", "elevator", "warehouse"][limiting] + " — upgrade it to earn more." : "Everything keeps up with the mines. Nice!");
+  }
   if (typeof upSel !== "undefined" && upSel) fillUpPopup();
   if (++slowN % 4 === 0 && INV.tab === "hero" && !$("panel-hero").classList.contains("hidden")) renderHero();
 }

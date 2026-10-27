@@ -31,17 +31,22 @@ let shaftsBuilt = false;
     const row = document.createElement("div");
     row.className = "floor locked";
     row.style.setProperty("--ore", def.color);
-    row.innerHTML = `<button type="button" class="btn-unlock-shaft">🔒 Unlock floor ${i + 1} · ${def.name}<br><small>${formatMoney(shaftUnlockCost(i))}</small></button>`;
+    const c = Shared.shaftUnlockCost(i, activeMine());
+    row.innerHTML = `<button type="button" class="btn-unlock-shaft">🔒 Unlock floor ${i + 1} · ${def.name}<br><small class="uc"><span class="ca">${formatMoney(c.cash)}</span>${c.mine ? `<span class="mi">◈ ${nf(c.mine)}</span>` : ""}${c.shards ? `<span class="sh">💠 ${c.shards}</span>` : ""}</small></button>`;
     const b = row.querySelector("button");
     b.addEventListener("click", () => buyShaftUnlock(i));
     floorUI.unlockBtn = b;
+    floorUI.unlockCost = c;
     return row;
   }
 
   async function buyShaftUnlock(floorIndex) {
     const mine = activeMine();
     if (floorIndex !== mine.unlockedShaftCount) return;
-    if (state.cash < shaftUnlockCost(floorIndex)) return toast("Not enough cash");
+    const c = Shared.shaftUnlockCost(floorIndex, mine);
+    if (state.cash < c.cash) return toast("Not enough cash");
+    if (c.mine && state.token < c.mine) return toast("Not enough $MINE (" + nf(c.mine) + " needed)");
+    if (c.shards && (state.bag.shards || 0) < c.shards) return toast("Not enough Mine Shards (" + c.shards + " needed) — miners find them from floor " + Shared.SHARD_FROM + " down");
     const j = await netAct({ type: "unlockFloor" });
     if (!j.ok) return toast(j.error);
     renderHUD();

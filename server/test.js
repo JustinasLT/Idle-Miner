@@ -426,12 +426,12 @@ function fakeChain() {
     const q = game.createPlayer("Quester"); game.touchPlayer(q); const t = () => game.now();
     const base = S.income(q, t()).base;
     const boost = () => Math.round(S.earnBoost(q, t()) * 100);
-    assert(boost() === 0 && S.questsDone(q, t()) === 0 && !S.offlineUnlocked(q, t()));
-    q.balance = 49999; assert(boost() === 0, "1 short of holding 50k"); q.balance = 50000; assert(boost() === 10, "hold 50k");
-    q.q.deposited = 50000; assert(boost() === 20, "deposit 50k");
-    q.q.spent = 24999; assert(boost() === 20); q.q.spent = 25000; assert(boost() === 30, "spend 25k");
-    q.created = t() - 23 * 3600e3; assert(boost() === 30, "23 h without withdrawing is not enough");
-    q.created = t() - 25 * 3600e3; assert(boost() === 40, "24 h without withdrawing");
+    assert(boost() === 10 && S.questsDone(q, t()) === 1 && !S.offlineUnlocked(q, t()), "a new player already has the '24h without withdrawing' quest done");
+    q.balance = 49999; assert(boost() === 10, "1 short of holding 50k"); q.balance = 50000; assert(boost() === 20, "hold 50k");
+    q.q.deposited = 50000; assert(boost() === 30, "deposit 50k");
+    q.q.spent = 24999; assert(boost() === 30); q.q.spent = 25000; assert(boost() === 40, "spend 25k");
+    q.lastWithdrawAt = t() - 23 * 3600e3; assert(boost() === 30, "23 h after a withdrawal is not enough");
+    q.lastWithdrawAt = t() - 25 * 3600e3; assert(boost() === 40, "24 h after a withdrawal");
     q.lastWithdrawAt = t() - 3600e3; assert(boost() === 30, "a withdrawal restarts the clock");
     q.lastWithdrawAt = 0;
     q.q.x = "someone"; assert(boost() === 40, "X alone is not enough");
@@ -449,27 +449,35 @@ function fakeChain() {
     assert((await act(tok, { type: "linkSocial", kind: "discord", handle: "linker.dev" })).j.social.discord === "linker.dev");
     assert(S.questValue(q, game.now(), "social") === 2);
   });
-  await T("shop boosts cost $MINE: +100 % XP, +50 % earnings, +100 % power (2 h each)", async () => {
+  await T("shop boosts are items: bought into the bag for $MINE, used on purpose (+100 % XP, +50 % earnings, +100 % power, 2 h each)", async () => {
     const a = game.createPlayer("Plain"), b = game.createPlayer("Boosted"), c = game.createPlayer("Powered");
     for (const p of [a, b, c]) game.touchPlayer(p);
     b.balance = 5000; c.balance = 5000;
     game.act(b, { type: "buy", item: "boost_xp" }); game.act(b, { type: "buy", item: "boost_earn" });
     game.act(c, { type: "buy", item: "boost_power" });
     assert(near(5000 - b.balance, PRICES.boost_xp + PRICES.boost_earn, 0.0001) && near(5000 - c.balance, PRICES.boost_power, 0.0001), "$MINE prices");
+    assert(b.bag.boost_xp === 1 && b.bag.boost_earn === 1 && c.bag.boost_power === 1, "bought boosts land in the bag");
+    assert(b.boosts.xp === 0 && b.boosts.earn === 0 && c.boosts.power === 0, "nothing is active until the player uses it");
+    let t0 = false; try { game.act(a, { type: "useItem", item: "boost_xp" }); } catch (e) { t0 = e.status === 400; } assert(t0, "can't use what you don't have");
+    game.act(b, { type: "useItem", item: "boost_xp" }); game.act(b, { type: "useItem", item: "boost_earn" }); game.act(c, { type: "useItem", item: "boost_power" });
+    assert(b.bag.boost_xp === 0 && b.bag.boost_earn === 0, "using consumes the item");
     const left = b.boosts.xp - game.now(); assert(near(left, 2 * 3600e3, 0.01), "lasts 2 h");
     const mixed = game.mining(c);
     assert(mixed.powerMult === 2 && near(mixed.boostedPower, 2 * c.power, 0.0001) && c.power === S.heroPower(c) && game.mining(a).powerMult === 1, "power boost doubles the stake weight, the displayed/leaderboard power stays");
     const cash0 = [a.cash, b.cash], xp0 = [totalXp(a.hero), totalXp(b.hero)];
     for (let i = 0; i < 40; i++) { step(15e3); game.touchPlayer(a); game.touchPlayer(b); }
-    assert(near(b.cash - cash0[1], 1.5 * (a.cash - cash0[0]), 0.01), "earnings x1.5");
+    // everybody has +10 % from the 24 h quest; the boosted player has +50 % on top
+    assert(near(b.cash - cash0[1], (1.6 / 1.1) * (a.cash - cash0[0]), 0.01), "earnings x1.5 on top of the quest boost");
     assert(near(totalXp(b.hero) - xp0[1], 2 * (totalXp(a.hero) - xp0[0]), 0.01), "XP x2");
-    for (let i = 0; i < 5; i++) game.act(b, { type: "buy", item: "boost_xp" });
-    let capped = false; b.balance = 1e6; try { game.act(b, { type: "buy", item: "boost_xp" }); } catch (e) { capped = e.status === 400; }
-    assert(capped, "boosts stack up to 12 h");
+    b.balance = 1e6;
+    for (let i = 0; i < 6; i++) game.act(b, { type: "buy", item: "boost_xp" });
+    for (let i = 0; i < 5; i++) game.act(b, { type: "useItem", item: "boost_xp" });
+    let capped = false; try { game.act(b, { type: "useItem", item: "boost_xp" }); } catch (e) { capped = e.status === 400; }
+    assert(capped && b.bag.boost_xp === 1, "boosts stack up to 12 h; the refused item stays in the bag");
     // the boost runs out exactly after its time
-    const d = game.createPlayer("Short"); game.touchPlayer(d); d.balance = 1000; game.act(d, { type: "buy", item: "boost_earn" });
+    const d = game.createPlayer("Short"); game.touchPlayer(d); d.balance = 1000; game.act(d, { type: "buy", item: "boost_earn" }); game.act(d, { type: "useItem", item: "boost_earn" });
     step(3 * 3600e3 + 1); const rate = S.income(d, game.now()).base; game.touchPlayer(d);
-    assert(S.earnMult(d, game.now()) === 1 && rate > 0, "expired");
+    assert(S.earnMult(d, game.now()) === 1.1 && rate > 0, "expired (only the quest boost is left)");
   });
   await T("hero levelling takes about 15 days of play, and no longer disappears on day 1", async () => {
     let xp = 0; for (let l = 1; l < S.HERO_MAX; l++) xp += S.xpNeed(l);
@@ -509,6 +517,137 @@ function fakeChain() {
     assert(st.players >= 10 && st.online >= 1 && st.online <= st.players && st.daily >= 0 && near(st.daily, st.perSec * 86400, 0.0001), JSON.stringify(st));
     const q = game.createPlayer("Fresh"); game.touchPlayer(q);
     const board = game.board(); assert(board.total === Object.keys(game.db.players).length);
+  });
+
+  console.log("v3: floors & shards, bag, daily reward, quests, referrals, offline loot, durability");
+  const maxMine = (p, floors) => { const m = p.mines.start; m.unlockedShaftCount = m.maxUnlocked = floors; m.shafts.forEach((sh) => (sh.level = 20)); m.warehouse.level = 60; m.elevator.level = 60; };
+  const toNextDay = () => step(Date.parse(game.dayStr(game.now())) + 864e5 - game.now() + 60e3); // one minute after the next 00:00 UTC
+  await T("floor prices: 1-10 coins, 11-20 coins + $MINE, 21-30 coins + $MINE + Mine Shards; nothing is taken unless everything is there", async () => {
+    const q = game.createPlayer("Unlocker"); game.touchPlayer(q); const m = q.mines.start;
+    for (let i = 1; i < 10; i++) { const c = S.shaftUnlockCost(i, m); assert(c.cash > 0 && c.mine === 0 && c.shards === 0, "floor " + (i + 1)); }
+    for (let i = 10; i < 20; i++) { const c = S.shaftUnlockCost(i, m); assert(c.mine > 0 && c.shards === 0, "floor " + (i + 1)); }
+    for (let i = 20; i < 30; i++) { const c = S.shaftUnlockCost(i, m); assert(c.mine > 0 && c.shards > 0, "floor " + (i + 1)); }
+    const fail = (msg) => { let st = 0; try { game.act(q, { type: "unlockFloor" }); } catch (e) { st = e.status; assert(msg.test(e.message), e.message); } assert(st === 400, "refused"); };
+    m.unlockedShaftCount = m.maxUnlocked = 10; q.cash = 1e15; q.balance = 0;
+    fail(/\$MINE/); assert(m.unlockedShaftCount === 10 && q.cash === 1e15, "nothing taken");
+    q.balance = S.UNLOCK_MINE[0]; const sp = q.q.spent; game.act(q, { type: "unlockFloor" });
+    assert(m.unlockedShaftCount === 11 && q.balance === 0 && q.q.spent - sp === S.UNLOCK_MINE[0], "floor 11 cost $MINE, counted as spent");
+    m.unlockedShaftCount = m.maxUnlocked = 20; q.balance = S.UNLOCK_MINE[10] - 1; q.bag.shards = 99; fail(/\$MINE/);
+    q.balance = S.UNLOCK_MINE[10]; q.bag.shards = 1; fail(/Shard/); assert(q.balance === S.UNLOCK_MINE[10] && q.bag.shards === 1, "nothing taken");
+    q.bag.shards = 2; game.act(q, { type: "unlockFloor" });
+    assert(m.unlockedShaftCount === 21 && q.bag.shards === 0 && q.balance === 0, "floor 21 took coins + $MINE + 2 shards");
+    m.unlockedShaftCount = 1; m.maxUnlocked = 25; q.balance = 0; game.act(q, { type: "unlockFloor" }); // after a Prestige floors you owned cost coins only
+    m.unlockedShaftCount = 11; q.cash = 0; q.balance = 1e6; fail(/cash/);
+  });
+  await T("Mine Shards: only from floor 15 down, very rare, they wait in 'Claim mining rewards' and then stack in the bag", async () => {
+    const shallow = game.createPlayer("Shallow"), deep = game.createPlayer("Deep");
+    for (const p of [shallow, deep]) game.touchPlayer(p);
+    maxMine(shallow, 14); maxMine(deep, 30);
+    for (let i = 0; i < 24 * 60; i++) { step(60e3); game.touchPlayer(shallow); game.touchPlayer(deep); }   // 24 h of play
+    assert(shallow.pending.shards === 0 && shallow.bag.shards === 0, "floors 1-14 never drop shards");
+    const n = deep.pending.shards;
+    assert(n > 15 && n < 600, "deep mine finds some but not many in a day: " + n);
+    assert(deep.bag.shards === 0 && game.view(deep).pending.shards === n, "found shards wait in the reward stash");
+    const r = game.act(deep, { type: "claimRewards" });
+    assert(deep.bag.shards === n && deep.pending.shards === 0 && r.claimed.shards === n && game.view(deep).bag.shards === n, "claiming moves them into the bag");
+  });
+  await T("daily reward: 7-day calendar (coins / items, day 7 = $MINE), once per UTC day, a missed day restarts the week", async () => {
+    const q = game.createPlayer("Daily"); game.touchPlayer(q);
+    const claim = () => game.act(q, { type: "claimDaily" }).rewarded;
+    let r = claim(), v = game.view(q);
+    assert(r.day === 1 && r.cash >= 750 && v.daily.claimedToday && !v.daily.claimable, "day 1: coins");
+    let again = false; try { claim(); } catch (e) { again = e.status === 400; } assert(again, "only once per day");
+    toNextDay(); assert(game.view(q).daily.claimable && game.view(q).daily.day === 2);
+    const crates = q.hero.crates; r = claim(); assert(r.day === 2 && q.hero.crates === crates + 1, "day 2: a crate");
+    toNextDay(); r = claim(); assert(r.day === 3 && r.cash >= 1500, "day 3: coins");
+    toNextDay(); r = claim(); assert(r.day === 4 && q.bag.boost_xp === 1, "day 4: a boost item in the bag");
+    toNextDay(); r = claim(); assert(r.day === 5 && r.cash >= 4000, "day 5: coins");
+    toNextDay(); const c6 = q.hero.crates; r = claim(); assert(r.day === 6 && q.hero.crates === c6 + 2, "day 6: crates");
+    toNextDay(); const b = q.balance, e = q.earned; r = claim();
+    assert(r.day === 7 && r.mine === S.DAILY_REWARDS[6].mine && q.balance - b === r.mine && q.earned - e === r.mine, "day 7: $MINE");
+    toNextDay(); r = claim(); assert(r.day === 1, "the week starts again");
+    toNextDay(); toNextDay(); r = claim(); assert(r.day === 1, "a missed day restarts the week");
+    toNextDay(); r = claim(); assert(r.day === 2, "streak continues when you come every day");
+    assert(game.view(q).seasonQuests.items.find((x) => x.id === "s_daily").value === 10, "claims count for the seasonal quest");
+  });
+  await T("daily quests count what you do and reset every day; all four give a bonus; seasonal quests run for the whole season", async () => {
+    const q = game.createPlayer("Questy"); game.touchPlayer(q); q.cash = 1e12;
+    const dq = () => game.view(q).dailyQuests, val = (id) => dq().items.find((x) => x.id === id).value;
+    assert(dq().items.length === 4 && dq().items.every((x) => x.value === 0 && !x.claimed));
+    const claim = (kind, id) => game.act(q, { type: "claimQuest", kind, id }).rewarded;
+    const refuse = (kind, id) => { let st = 0; try { game.act(q, { type: "claimQuest", kind, id }); } catch (e) { st = e.status; } return st === 400; };
+    assert(refuse("daily", "d_lvls"), "not finished yet"); assert(refuse("daily", "nope") && refuse("weekly", "d_lvls"));
+    game.act(q, { type: "upgrade", target: "warehouse", n: 10 }); assert(val("d_lvls") === 10);
+    const c0 = q.cash; assert(claim("daily", "d_lvls").cash >= 1000 && q.cash > c0 && refuse("daily", "d_lvls"), "levels quest paid once");
+    for (let i = 0; i < 2; i++) game.act(q, { type: "upgradeItem", id: q.eq.Pickaxe });
+    assert(val("d_item") === 2); const cr = q.hero.crates; claim("daily", "d_item"); assert(q.hero.crates === cr + 1);
+    const it = S.itemById(q, q.eq.Pickaxe); it.dur = it.max - 5; game.act(q, { type: "repair", id: it.id }); assert(val("d_repair") === 1); claim("daily", "d_repair");
+    let bonusEarly = false; try { game.act(q, { type: "claimDailyBonus" }); } catch (e) { bonusEarly = e.status === 400; } assert(bonusEarly, "bonus needs all four");
+    for (let i = 0; i < 31; i++) { step(60e3); game.touchPlayer(q); }
+    assert(val("d_play") >= 1800); claim("daily", "d_play");
+    const cr2 = q.hero.crates, xb = q.bag.boost_xp; game.act(q, { type: "claimDailyBonus" });
+    assert(q.hero.crates === cr2 + 1 && q.bag.boost_xp === xb + 1 && game.view(q).dailyQuests.bonusClaimed, "bonus for finishing all daily quests");
+    // seasonal: counters kept, state quests read the live game
+    const sv = () => game.view(q).seasonQuests.items;
+    assert(sv().find((x) => x.id === "s_lvls").value === 10 && sv().find((x) => x.id === "s_item").value === 2 && sv().find((x) => x.id === "s_play").value >= 1800);
+    assert(refuse("season", "s_floors") && refuse("season", "s_level"));
+    q.mines.start.maxUnlocked = 20; q.hero.lvl = 40;
+    const b0 = q.balance; assert(claim("season", "s_floors").mine === 100 && q.balance - b0 === 100, "seasonal $MINE reward");
+    const cr3 = q.hero.crates, xb3 = q.bag.boost_xp; claim("season", "s_level"); assert(q.hero.crates === cr3 + 3 && q.bag.boost_xp === xb3 + 2);
+    toNextDay();
+    assert(dq().items.every((x) => x.value === 0 && !x.claimed) && !dq().bonusClaimed, "daily quests reset at 00:00 UTC");
+    assert(sv().find((x) => x.id === "s_lvls").value === 10 && sv().find((x) => x.id === "s_floors").claimed, "seasonal progress and claims stay");
+  });
+  await T("referrals: link -> new player; referrer gets 25 % of pack spending (SOL or $MINE); leaderboard lists referrer, referred people, earnings", async () => {
+    const boss = (await call("POST", "/api/guest", { name: "Boss" })).j, bp = game.db.players[boss.id];
+    assert(boss.ref.code && boss.ref.code.length === 8 && boss.ref.count === 0 && boss.ref.rate === 0.25);
+    const mk = (name, wallet, code) => game.createPlayer(name, wallet, code);
+    const f1 = mk("Friend1", "FriendWallet1", boss.ref.code), f2 = mk("Friend2", "FriendWallet2", boss.ref.code.toLowerCase());
+    const stranger = mk("Stranger", "StrangerWallet", "NOSUCHCD");
+    assert(f1.referredBy === bp.id && f2.referredBy === bp.id && stranger.referredBy === null, "valid codes work (any case), unknown codes are ignored");
+    const viaApi = (await call("POST", "/api/guest", { name: "ApiFriend", ref: boss.ref.code })).j; assert(game.db.players[viaApi.id].referredBy === bp.id, "the guest endpoint takes ?ref");
+    assert(game.view(bp).ref.count === 3);
+    f1.balance = 50000; const b0 = bp.balance;
+    await bank.buyPackWithMine(f1, 1);
+    assert(near(bp.balance - b0, PACKS[0].mine * 0.25, 1e-9) && near(bp.refEarned, PACKS[0].mine * 0.25, 1e-9) && near(f1.refPaid, PACKS[0].mine * 0.25, 1e-9), "25 % of the $MINE price");
+    const b1 = bp.balance; game.grantPack(f2, PACKS[1], "sol");
+    assert(near(bp.balance - b1, PACKS[1].sol * 1e6 * 0.25, 1e-9), "SOL purchases pay 25 % of their value in $MINE");
+    assert(stranger.balance === 0 && bp.refEarned > 0);
+    const other = mk("Small", "SmallWallet", null), small = mk("SmallFriend", "SmallWallet2", other.refCode); game.grantPack(small, PACKS[0], "sol");
+    const lb = (await call("GET", "/api/referrals/leaderboard")).j, tok = boss.token, mine = (await call("GET", "/api/referrals/leaderboard", null, tok)).j;
+    assert(lb.rows[0].name === "Boss" && lb.rows[0].referred === 3 && near(lb.rows[0].earned, bp.refEarned, 1e-9) && lb.rows[0].rank === 1 && lb.rows[1].name === "Small" && lb.me === null, "public board, sorted by earnings");
+    assert(mine.me.rank === 1 && mine.me.name === "Boss", "your own row");
+    const my = (await call("GET", "/api/referrals", null, tok)).j;
+    assert(my.code === boss.ref.code && my.count === 3 && my.list.length === 3 && my.list[0].name === "Friend2", "your referred players, biggest payer first");
+    assert((await call("GET", "/api/referrals")).s === 401, "the personal list needs a login");
+    assert(!JSON.stringify(lb).includes('"id"') && !JSON.stringify(lb).includes("wallet"), "no ids or wallets leak into the board");
+    const sub = Object.keys(game.db.players).length; assert(sub > 5);
+  });
+  await T("while away you also earn $MINE and loot: tallied for the Welcome-back screen, loot waits in Claim mining rewards", async () => {
+    const q = game.createPlayer("Away"); finishQuests(q); game.touchPlayer(q);
+    maxMine(q, 30); game.touchPlayer(q);
+    for (let i = 0; i < 8 * 60 + 5; i++) { step(60e3); game.tick(); }                    // 8 h away, the server keeps paying
+    game.touchPlayer(q);
+    const a = game.view(q).offline.away;
+    assert(a.cash > 0 && a.mine > 0 && a.items > 0 && a.shards > 0, "cash, $MINE, items and shards: " + JSON.stringify(a));
+    assert(q.pending.items.length >= Math.min(a.items, C.PENDING_MAX) - 0 && q.pending.shards === a.shards, "loot is in the reward stash");
+    const bal = q.balance, r = game.act(q, { type: "claimOffline" }).offlineClaimed;
+    assert(r.cash === a.cash && r.mine === a.mine && r.items === a.items && r.shards === a.shards, "collecting reports the same tally");
+    assert(q.balance === bal && game.view(q).offline.away.mine === 0 && game.view(q).offline.away.items === 0, "$MINE was already in the balance; the tally is cleared");
+  });
+  await T("0 durability = unusable (no stats, no power, can't be equipped, auto-equip skips it); anything above 0 works at full strength", async () => {
+    const q = game.createPlayer("Breaker"); game.touchPlayer(q); q.cash = 1e9;
+    const it = S.itemById(q, q.eq.Pickaxe), full = S.computeFx(q).yield, pw = S.heroPower(q);
+    it.dur = 1; assert(S.computeFx(q).yield === full && S.heroPower(q) === pw && S.usable(it), "1 durability still works at 100 %");
+    it.dur = 0; assert(S.computeFx(q).yield === 0 && S.itemPower(it) === 0 && S.heroPower(q) < pw && !S.usable(it), "broken: no bonus, no power");
+    game.act(q, { type: "unequip", slot: "Pickaxe" });
+    let st = 0; try { game.act(q, { type: "equip", id: it.id }); } catch (e) { st = e.status; assert(/broken|repair/i.test(e.message)); } assert(st === 400, "can't equip a broken item");
+    game.act(q, { type: "autoEquip" }); assert(!q.eq.Pickaxe, "auto-equip skips broken gear");
+    game.act(q, { type: "repair", id: it.id }); assert(it.dur === it.max && it.dur > 0);
+    game.act(q, { type: "equip", id: it.id }); assert(q.eq.Pickaxe === it.id && S.computeFx(q).yield > 0, "repaired gear works again");
+    // gear that wears out during play stops working but stays in the slot until repaired
+    it.dur = 1; q.wear = 0.9999; step(30e3); game.touchPlayer(q); step(30e3); game.touchPlayer(q);
+    assert(it.dur === 0 && S.computeFx(q).yield === 0, "gear that reaches 0 durability stops working");
   });
 
   console.log("persistence & leaderboard & web security");

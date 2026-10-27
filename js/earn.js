@@ -9,11 +9,11 @@ const fmtAgo = (ms) => (ms < 90e3 ? "just now" : ms < 3600e3 ? Math.round(ms / 6
 function renderMineButtons() {
   const claim = $("btn-claim");
   if (!claim) return;
-  const p = state.pending, n = p.n + p.crates;
+  const p = state.pending, n = p.n + p.crates + (p.shards || 0);
   claim.classList.toggle("has", n > 0);
   $("claim-badge").hidden = n === 0;
   setText($("claim-badge"), n > 99 ? "99+" : String(n));
-  setText($("claim-sub"), n > 0 ? p.n + " item" + (p.n === 1 ? "" : "s") + (p.crates ? " · " + p.crates + " crate" + (p.crates === 1 ? "" : "s") : "") : "nothing new yet");
+  setText($("claim-sub"), n > 0 ? p.n + " item" + (p.n === 1 ? "" : "s") + (p.crates ? " · " + p.crates + " crate" + (p.crates === 1 ? "" : "s") : "") + (p.shards ? " · " + p.shards + " 💠" : "") : "nothing new yet");
   setText($("earn-pct"), "+" + Math.round(state.earnBoost.total * 100) + "%");
   setText($("earn-sub"), state.offline.unlocked ? "Offline Earnings on" : state.quests.filter((q) => q.done).length + "/" + Shared.QUESTS.length + " quests");
   $("btn-earn").classList.toggle("perk", state.offline.unlocked);
@@ -26,15 +26,15 @@ function openClaim() {
   const counts = RARITIES.map((R, r) => [R, items.filter((i) => i[1] === r).length]).filter(([, c]) => c).reverse();
   const shown = items.slice(0, 40);
   const tiles = shown.map(([slot, r, il]) => `<span class="claim-tile" style="--rc:${RARITIES[r].c}" title="${RARITIES[r].n} ${slot} · Lv ${il}"><i>${SLOT_ICON[slot]}</i><b>${il}</b></span>`).join("");
-  const empty = !p.n && !p.crates;
+  const empty = !p.n && !p.crates && !p.shards;
   openModal(`<h2>🎁 Mining rewards</h2>
     <p class="small">Found since your last claim · ${p.since ? fmtAgo(serverNow() - p.since) : "—"}</p>
     <div class="claim-stats">
-      <div><b>${p.n}</b><small>items</small></div><div><b>${p.crates}</b><small>crates</small></div>
+      <div><b>${p.n}</b><small>items</small></div><div><b>${p.crates}</b><small>crates</small></div><div><b class="shc">💠 ${p.shards || 0}</b><small>shards</small></div>
       <div><b>${formatMoney(p.cash)}</b><small>cash mined</small></div><div><b class="tokc">◈ ${formatToken(p.mine)}</b><small>$MINE mined</small></div>
     </div>
-    ${empty ? `<p class="dim">Nothing found yet. Items and crates drop while your miners work — deeper floors give better rarities.</p>`
-      : `<div class="claim-chips">${counts.map(([R, c]) => `<span style="--rc:${R.c}">${c}× ${R.n}</span>`).join("")}${p.crates ? `<span style="--rc:#ffb74d">${p.crates}× Crate</span>` : ""}</div>
+    ${empty ? `<p class="dim">Nothing found yet. Items and crates drop while your miners work — deeper floors give better rarities, and from floor ${Shared.SHARD_FROM} down they can also find very rare Mine Shards.</p>`
+      : `<div class="claim-chips">${counts.map(([R, c]) => `<span style="--rc:${R.c}">${c}× ${R.n}</span>`).join("")}${p.crates ? `<span style="--rc:#ffb74d">${p.crates}× Crate</span>` : ""}${p.shards ? `<span style="--rc:#4dd0e1">${p.shards}× Mine Shard</span>` : ""}</div>
          <div class="claim-grid">${tiles}${items.length > shown.length ? `<span class="claim-more">+${items.length - shown.length} more</span>` : ""}</div>`}
     ${p.n && spare + p.n > cap ? `<p class="warn">🎒 Backpack ${spare}/${cap}: only ${Math.max(0, cap - spare)} item(s) fit — the rest stay here until you make room (sell items or unlock a page).</p>` : ""}
     <p class="dim small">Cash and $MINE are already in your balance — this is the loot you still have to pick up. Up to ${p.max} items are kept; more are auto-sold.</p>
@@ -48,7 +48,7 @@ async function doClaim() {
   if (!r.ok) { toast(r.error); Sound.play("error"); return openClaim(); }
   const c = r.claimed;
   Sound.play("claim");
-  toast("🎁 Claimed " + c.items + " item" + (c.items === 1 ? "" : "s") + (c.crates ? " + " + c.crates + " crate" + (c.crates === 1 ? "" : "s") : "") + (c.left ? " · backpack full, " + c.left + " still waiting" : ""));
+  toast("🎁 Claimed " + c.items + " item" + (c.items === 1 ? "" : "s") + (c.crates ? " + " + c.crates + " crate" + (c.crates === 1 ? "" : "s") : "") + (c.shards ? " + " + c.shards + " 💠 shard" + (c.shards === 1 ? "" : "s") : "") + (c.left ? " · backpack full, " + c.left + " still waiting" : ""));
   if (c.left) openClaim(); else closeModal();
   renderHUD();
 }

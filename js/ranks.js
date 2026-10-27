@@ -1,18 +1,21 @@
 "use strict";
 // Leaderboard panel (all data comes from the server).
 let ranksTimer = 0, ranksData = null;
+const RANKS = { tab: "season" };
+const rankTabs = () => `<div class="ref-tabs">${[["season", "🏆 Season"], ["ref", "🤝 Referrals"]].map(([k, n]) => `<button type="button" class="ref-tab${RANKS.tab === k ? " on" : ""}" data-rt="${k}">${n}</button>`).join("")}</div>`;
 const ranksOpen = () => !$("panel-ranks").classList.contains("hidden");
 function fmtLeft(ms) {
   const s = Math.floor(ms / 1000), d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60), x = s % 60;
   return `${d}d ${String(h).padStart(2, "0")}h ${String(m).padStart(2, "0")}m ${String(x).padStart(2, "0")}s`;
 }
 async function renderRanks() {
-  if (!ranksData) $("ranks-content").innerHTML = `<p class="dim small" style="padding:20px;text-align:center">Loading leaderboard…</p>`;
+  if (RANKS.tab === "ref") return renderRefTab();
+  if (!ranksData) $("ranks-content").innerHTML = rankTabs() + `<p class="dim small" style="padding:20px;text-align:center">Loading leaderboard…</p>`;
   try { ranksData = await netBoard(); } catch (e) {
-    $("ranks-content").innerHTML = `<div class="coming-soon"><span>📡</span><b>Can't reach the game server</b><small>${e.message}</small><button type="button" class="inv-btn" data-r="retry">Retry</button></div>`;
+    $("ranks-content").innerHTML = rankTabs() + `<div class="coming-soon"><span>📡</span><b>Can't reach the game server</b><small>${e.message}</small><button type="button" class="inv-btn" data-r="retry">Retry</button></div>`;
     return;
   }
-  if (!ranksOpen()) return;
+  if (!ranksOpen() || RANKS.tab !== "season") return;
   const D = ranksData, over = D.season.over, mine = D.me || { rank: 0, pts: 0, prize: 0 }, m = miningInfo();
   const info = net.info, claimed = info && info.claimed;
   const medal = (r) => (r === 1 ? "🥇" : r === 2 ? "🥈" : r === 3 ? "🥉" : r);
@@ -21,7 +24,7 @@ async function renderRanks() {
   const inTop = D.me && D.me.rank <= LB_SIZE;
   const claim = over && info && !claimed ? `<button type="button" class="btn-primary claim" data-r="claim">🏆 Claim ${mine.prize ? formatToken(mine.prize) + " $MINE" : "(no prize this season)"}</button>` : over ? `<p class="dim small">Prize claimed ✓</p>` : "";
   const dayNo = Math.min(SEASON_DAYS, Math.floor((D.season.now - D.season.start) / 864e5) + 1);
-  $("ranks-content").innerHTML = `
+  $("ranks-content").innerHTML = rankTabs() + `
     <div class="season-hero"><small>SEASON 0 PRIZE POOL</small><b class="prize-big">◈ ${formatToken(LB_POOL + MINING_POOL)} $MINE</b>
       <div class="season-split"><span>🏆 ${formatToken(LB_POOL)} top ${LB_SIZE} prizes</span><span>⛏️ ${formatToken(MINING_POOL)} mining</span></div>
       <div class="season-timer"><small>${over ? "SEASON ENDED" : "TIME REMAINING"}</small><b id="season-left">${fmtLeft(seasonLeftMs())}</b></div>
@@ -46,10 +49,49 @@ function renameUser() {
   };
   $("name-no").onclick = closeModal;
 }
+
+// ---------------------------------------------------------------- referrals: your link + referral leaderboard
+let refLinkText = "";
+async function renderRefTab() {
+  const el = $("ranks-content");
+  if (!refLinkText) el.innerHTML = rankTabs() + `<p class="dim small" style="padding:20px;text-align:center">Loading…</p>`;
+  let lb, mine;
+  try { [lb, mine] = await Promise.all([api("GET", "referrals/leaderboard"), api("GET", "referrals")]); }
+  catch (e) { el.innerHTML = rankTabs() + `<div class="coming-soon"><span>📡</span><b>Can't reach the game server</b><small>${esc(e.message)}</small><button type="button" class="inv-btn" data-r="retry">Retry</button></div>`; return; }
+  if (!ranksOpen() || RANKS.tab !== "ref") return;
+  refLinkText = location.origin + "/?ref=" + mine.code;
+  const rate = Math.round(mine.rate * 100), myName = state.name;
+  const row = (r, me) => `<tr class="${me ? "me" : ""}"><td class="rk">${r.rank === 1 ? "🥇" : r.rank === 2 ? "🥈" : r.rank === 3 ? "🥉" : r.rank || "–"}</td><td class="nmc">${me ? "⭐ " : ""}${esc(r.name)}</td><td>${nf(r.referred)}</td><td class="tokc">${formatToken(r.earned)}</td></tr>`;
+  const inTop = lb.me && lb.me.rank > 0 && lb.me.rank <= lb.rows.length;
+  const people = mine.list.length ? mine.list.map((p) => `<div class="st-row"><span>${esc(p.name)}</span><b>${p.pack ? "📦 pack bought" : "<span class='dim'>no pack yet</span>"} <span class="tokc">◈ ${formatToken(p.paid)}</span></b></div>`).join("")
+    : `<p class="dim">Nobody yet — share your link!</p>`;
+  el.innerHTML = rankTabs() + `<div class="ref-pad">
+    <div class="inv-card"><h3>🤝 Invite friends</h3>
+      <p class="dim">Share your personal link. Whenever someone who joined through it spends on a pack, <b>you get ${rate}%</b> of that amount as $MINE in your balance.</p>
+      <div class="ref-link"><input id="ref-link" class="name-in" readonly value="${esc(refLinkText)}" /><button type="button" class="inv-btn gold" data-r="copyref">Copy</button>${navigator.share ? `<button type="button" class="inv-btn" data-r="shareref">Share</button>` : ""}</div>
+      <div class="ref-stats"><div><b>${nf(mine.count)}</b><small>referred</small></div><div><b class="tokc">◈ ${formatToken(mine.earned)}</b><small>earned</small></div><div><b>${rate}%</b><small>of pack spending</small></div></div>
+      <p class="dim small">Code: <b class="mono">${esc(mine.code)}</b>${state.ref && state.ref.by ? " · you joined through <b>" + esc(state.ref.by) + "</b>" : ""}</p></div>
+    <div class="inv-card ref-list"><h3>Your referred players</h3>${people}</div>
+    <h3 style="margin:12px 0 6px">🏆 Referral leaderboard</h3>
+    <div class="rank-wrap"><table class="rank-t"><thead><tr><th>#</th><th>User</th><th>Referred</th><th>$Mine earned</th></tr></thead><tbody>
+      ${lb.rows.length ? lb.rows.map((r) => row(r, r.name === myName && lb.me && r.rank === lb.me.rank)).join("") : `<tr><td colspan="4" class="dim">No referrals yet — be the first!</td></tr>`}
+      ${lb.me && !inTop ? `<tr class="gap"><td colspan="4">⋯</td></tr>${row(lb.me, true)}` : ""}
+    </tbody></table></div>
+    <p class="dim small rank-note">Ranked by $MINE earned from referrals, then by number of referred players.</p></div>`;
+}
+async function copyRefLink() {
+  try { await navigator.clipboard.writeText(refLinkText); toast("Link copied 📋"); }
+  catch { const i = $("ref-link"); if (i) { i.select(); try { document.execCommand("copy"); toast("Link copied 📋"); } catch { toast("Press Ctrl+C to copy"); } } }
+}
+function shareRefLink() { navigator.share({ title: "Idle Mountain Miner", text: "Come mine with me!", url: refLinkText }).catch(() => {}); }
 function setupRanks() {
   $("ranks-content").addEventListener("click", async (e) => {
+    const tb = e.target.closest("[data-rt]");
+    if (tb) { RANKS.tab = tb.dataset.rt; return renderRanks(); }
     const b = e.target.closest("[data-r]");
     if (!b) return;
+    if (b.dataset.r === "copyref") return copyRefLink();
+    if (b.dataset.r === "shareref") return shareRefLink();
     if (b.dataset.r === "rename") renameUser();
     else if (b.dataset.r === "retry") { await netSync(); renderRanks(); }
     else if (b.dataset.r === "claim") {

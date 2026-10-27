@@ -24,7 +24,7 @@
 .wide-btn{width:100%;margin-top:6px}
 
 /* ---- claim mining rewards ---- */
-.claim-stats{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin:10px 0}
+.claim-stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(64px,1fr));gap:6px;margin:10px 0}
 .claim-stats div{background:rgba(255,255,255,.06);border-radius:9px;padding:8px 4px;text-align:center}
 .claim-stats b{display:block;font-size:.95rem;font-weight:900}.claim-stats small{font-size:.55rem;text-transform:uppercase;letter-spacing:.05em;opacity:.65}
 .claim-chips{display:flex;flex-wrap:wrap;gap:5px;margin-bottom:8px}

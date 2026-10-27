@@ -55,10 +55,12 @@ async function createApp(opts = {}) {
     "GET /api/config": () => ({ ...bank.publicConfig(), nonceTtl: 300 }),
     "GET /api/leaderboard": ({ p }) => game.leaderboard(p),
     "GET /api/stats": ({ ip }) => { limit("stats:" + ip, 120, 60e3); return game.stats(); },
+    "GET /api/referrals/leaderboard": ({ p }) => game.refBoard(p),
+    "GET /api/referrals": ({ p }) => game.referrals(p),
 
     "POST /api/guest": ({ ip, body }) => {
       limit("guest:" + ip, 20, 3600e3); limit("guest:all", 600, 3600e3);
-      const p = game.createPlayer(body.name);
+      const p = game.createPlayer(body.name, null, body.ref);
       return sessionReply(p, game.newSession(p), {});
     },
     "POST /api/auth/nonce": ({ ip, body, host }) => {
@@ -82,7 +84,7 @@ async function createApp(opts = {}) {
       let p, linked = false, switched = false;
       if (existing) { p = existing; switched = !!caller && caller.id !== existing.id; }
       else if (caller && !caller.wallet) { p = caller; game.linkWallet(p, body.wallet); linked = true; }
-      else p = game.createPlayer(body.name, body.wallet);
+      else p = game.createPlayer(body.name, body.wallet, body.ref);
       game.touchPlayer(p);
       const token = game.newSession(p);
       await game.saveNow([p]);
@@ -113,7 +115,7 @@ async function createApp(opts = {}) {
     "POST /api/pack/order": ({ p, body }) => { limit("bank:" + p.id, 30, 60e3); return bank.createPackOrder(p, body.pack); },
     "POST /api/pack/confirm": ({ p, body }) => { limit("bank:" + p.id, 60, 60e3); return bank.confirmPackOrder(p, body.order, body.signature).then((r) => ({ ...r, ...game.view(p) })); },
   };
-  const PUBLIC = new Set(["GET /api/health", "GET /api/config", "GET /api/leaderboard", "GET /api/stats", "POST /api/guest", "POST /api/auth/nonce", "POST /api/auth/wallet"]);
+  const PUBLIC = new Set(["GET /api/health", "GET /api/config", "GET /api/leaderboard", "GET /api/referrals/leaderboard", "GET /api/stats", "POST /api/guest", "POST /api/auth/nonce", "POST /api/auth/wallet"]);
 
   // ---- static files (whitelist only: never serve /server, .git, data files...) ------------------------------------
   const VENDOR = [["node_modules", "@solana", "web3.js", "lib", "index.iife.min.js"], ["node_modules", "@solana", "web3.js", "lib", "index.iife.js"]].map((a) => path.join(ROOT, ...a));

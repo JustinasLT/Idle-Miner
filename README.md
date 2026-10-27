@@ -41,11 +41,21 @@ server, so also add a free external pinger (UptimeRobot / cron-job.org) hitting
 - Login: Solana wallet (signed one-time message) or guest. Guests can't withdraw; linking a wallet later keeps the progress (if that wallet already has an account you switch to it).
 - Free tier: everything except withdrawals, earns up to **20,000 $MINE** (about 1–2 h of play), then $MINE earning stops until any pack is bought. Paid tiers are uncapped (original earn rates).
 - Packs (one-time each): Prospector 0.05 SOL (45k $MINE), Foreman 0.15 SOL (135k), Tycoon 0.4 SOL (360k). Smaller loot than before (Prospector = 4 Rare, Foreman = 6 Epic, Tycoon = 8 Legendary).
-- Pacing: max hero level takes about 15 days at ~12 h/day of play.
+- Pacing: max manager level (the "Manager", formerly Hero) takes about 15 days at ~12 h/day of play.
 - Mining loot lands in a pending list; the **Claim mining rewards** button on the mine screen moves it to the backpack (cap 100 pending, extra is auto-sold).
 - Item upgrades: +1 to +10 (+10% stats each), success chance falls from 95% to 7%. First 3 cost coins only, +4..+10 cost coins + $MINE. A failed upgrade keeps the level but spends the price.
 - Quests (+10% earnings each, max +50%): hold 50k $MINE, deposit 50k, spend 25k, 24 h without withdrawing, link X and Discord (handles are **not verified**). All five unlock Offline Earnings (up to 8 h at 50% cash). Without it, earning stops 15 min after you close the tab.
-- Shop boosts (paid in $MINE, 2 h each, stackable to 12 h): +100% XP, +50% earnings, +100% power ($MINE share). Prices in `server/config.js` (`PRICES`).
+- Shop boosts (paid in $MINE, 2 h each, stackable to 12 h): +100% XP, +50% earnings, +100% power ($MINE share). Prices in `server/config.js` (`PRICES`). A bought boost goes into the **bag** (Manager → BAG) and only starts when you press **Use**.
+- Floor (mine) prices: floors 1-10 cost coins; 11-20 cost coins + $MINE; 21-30 cost coins + $MINE + **Mine Shards**. Upgrades cost coins only. Floors you owned before a prestige/older version only cost coins (`maxUnlocked`). Tables: `S.UNLOCK_MINE`, `S.UNLOCK_SHARDS` in `js/shared.js`.
+- **Mine Shards**: very rare stackable item; miners on floor 15 and deeper find them (`S.SHARD_FROM`, `S.SHARD_P`). They wait in "Claim mining rewards", then live in the bag.
+- **Offline earnings** now include $MINE, items, crates and shards (cash/loot at 50%); the Welcome-back popup lists everything.
+- **Daily reward**: 7-day streak calendar, days 1-6 give coins/items/crates, day 7 gives $MINE. Missing a day restarts the week. Reset at 00:00 UTC.
+- **Quests**: 4 daily quests (+ perfect-day bonus) and 8 seasonal quests (30 days). Rewards are coins, crates, boosts or $MINE.
+- **Referrals**: `?ref=CODE` link; the referrer gets 25% (`REF_RATE`) of every pack the referred player buys, paid as $MINE. Referral leaderboard in Ranks → Referrals.
+- **Durability**: gear at 0% is unusable (no stats, can't be equipped); anything above 0% works at full strength.
+- The "24 h without withdrawing" quest is already complete for new players until their first withdrawal.
+- Events tab: placeholder ("coming soon").
+- See `GAME_DESIGN.md` for the full description meant to be given to an AI assistant.
 - Withdrawals: 20% fee, max 250k per withdrawal (gross), 24 h cooldown.
 - Settings: sound/music, change username, log out, reset progress, delete account (wallet accounts holding $MINE can't be deleted).
 - Bank: deposit/withdraw $MINE. SOL pack purchases go directly to `MERCHANT_WALLET`.

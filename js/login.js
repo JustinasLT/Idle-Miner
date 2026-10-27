@@ -27,8 +27,8 @@ async function walletLogin(entry) {
     const n = await api("POST", "auth/nonce", { wallet: addr });
     const signature = await Wallet.signMessage(n.message);
     setLoginBusy("Checking…");
-    const j = await api("POST", "auth/wallet", { wallet: addr, nonce: n.nonce, signature });
-    setToken(j.token);
+    const j = await api("POST", "auth/wallet", { wallet: addr, nonce: n.nonce, signature, ref: refCode() });
+    setToken(j.token); forgetRef();
     applyView(j);
     enterGame();
     if (j.switched) toast("Welcome back! Loaded the progress saved on this wallet.");
@@ -43,8 +43,8 @@ async function walletLogin(entry) {
 async function guestLogin() {
   setLoginBusy("Creating your guest miner…");
   try {
-    const j = await api("POST", "guest", {});
-    setToken(j.token); applyView(j); enterGame();
+    const j = await api("POST", "guest", { ref: refCode() });
+    setToken(j.token); forgetRef(); applyView(j); enterGame();
   } catch (e) { setLoginBusy(""); $("login-msg").textContent = e.message; }
   setLoginBusy("");
 }

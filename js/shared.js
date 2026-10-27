@@ -11,8 +11,68 @@
   S.PAGE_SIZE = 48; S.MAX_PAGES = 5; S.PAGE_COST = [0, 300, 800, 2000, 5000]; // $MINE price of backpack page n+1
   S.ITEM_LVL_SPREAD = 10;
   S.DROP_P0 = 0.0002;
-  S.HERO_MAX = 100;
-  S.XP_PER_SEC = 0.2; // hero XP per second of play (before boosts / gear)
+  S.HERO_MAX = 100;                 // the "Manager" (internal name: hero)
+  S.XP_PER_SEC = 0.2; // manager XP per second of play (before boosts / gear)
+
+  // ---- Mine Shards: a very rare stackable item. Miners on floor SHARD_FROM and deeper find them (per finished ore trip). ----
+  S.SHARD_FROM = 15;
+  S.SHARD_P = 0.00005;              // chance per finished miner trip on floor 15 (+8 % per floor deeper)
+  S.SHARD_DEPTH_BONUS = 0.08;
+
+  // ---- price of unlocking floor n (1-based). Floors 1-10: coins. 11-20: coins + $MINE. 21-30: coins + $MINE + Mine Shards. ----
+  S.UNLOCK_MINE = [40, 60, 80, 110, 150, 200, 260, 340, 440, 560,            // floors 11-20
+                   450, 550, 650, 800, 950, 1100, 1300, 1500, 1750, 2000];   // floors 21-30
+  S.UNLOCK_SHARDS = [2, 3, 4, 5, 6, 8, 10, 12, 15, 20];                       // floors 21-30
+  // i = index (0-based) of the floor being unlocked. Floors you already owned before a Prestige only cost coins again.
+  S.shaftUnlockCost = (i, mine) => {
+    const floor = i + 1, cash = Math.floor(60 * Math.pow(2.8, i));
+    if (mine && i < (mine.maxUnlocked || 0)) return { cash, mine: 0, shards: 0 };
+    return { cash, mine: floor > 10 ? S.UNLOCK_MINE[floor - 11] : 0, shards: floor > 20 ? S.UNLOCK_SHARDS[floor - 21] : 0 };
+  };
+
+  // ---- the bag: stackable items (boosts you bought or won, Mine Shards) ----
+  S.BAG_ITEMS = {
+    shards: { icon: "💠", name: "Mine Shards", desc: "Very rare crystals found by miners from floor 15 down. Needed to unlock floors 21-30." },
+    boost_xp: { icon: "📖", name: "XP Boost", boost: "xp", desc: "Use it: +100% manager XP for 2 hours." },
+    boost_earn: { icon: "💰", name: "Earnings Boost", boost: "earn", desc: "Use it: +50% earnings (cash and your $MINE share) for 2 hours." },
+    boost_power: { icon: "⚡", name: "Power Boost", boost: "power", desc: "Use it: +100% power for your $MINE share for 2 hours." },
+  };
+  S.BAG_KEYS = Object.keys(S.BAG_ITEMS);
+  S.BAG_MAX = 999;
+
+  // ---- rewards (daily calendar, quests). cash = minutes of your current income (at least cashMin), crates, bag items, $MINE ----
+  S.rewardCash = (r, perSec) => (r && r.cash ? Math.max(r.cashMin || 0, Math.floor((perSec || 0) * 60 * r.cash)) : 0);
+  S.DAILY_REWARDS = [                                                  // day 1..7 of the login streak; day 7 pays $MINE
+    { cash: 15, cashMin: 750 },
+    { crates: 1 },
+    { cash: 30, cashMin: 1500 },
+    { bag: { boost_xp: 1 } },
+    { cash: 60, cashMin: 4000 },
+    { crates: 2, cash: 30, cashMin: 2000 },
+    { mine: 5000 },
+  ];
+  S.DAILY_QUESTS = [                                                   // reset every day at 00:00 UTC
+    { id: "d_play", icon: "⏱️", name: "Play for 15 minutes", metric: "play", target: 900, reward: { cash: 15, cashMin: 750 } },
+    { id: "d_lvls", icon: "⬆️", name: "Buy 10 upgrade levels", desc: "Floors, elevator or warehouse.", metric: "levels", target: 10, reward: { cash: 20, cashMin: 1000 } },
+    { id: "d_item", icon: "🔨", name: "Try 2 item upgrades", desc: "Success or fail, each attempt counts.", metric: "itemUp", target: 2, reward: { crates: 1 } },
+    { id: "d_repair", icon: "🔧", name: "Repair a piece of gear", metric: "repair", target: 1, reward: { cash: 10, cashMin: 500 } },
+  ];
+  S.DAILY_BONUS = { crates: 1, bag: { boost_xp: 1 } };                 // finish all daily quests
+  S.SEASON_QUESTS = [                                                  // last the whole 30-day season
+    { id: "s_play", icon: "🕓", name: "Play for 10 hours", metric: "play", target: 36000, reward: { crates: 3 } },
+    { id: "s_lvls", icon: "📈", name: "Buy 1,500 upgrade levels", metric: "levels", target: 1500, reward: { cash: 480, cashMin: 50000, bag: { boost_earn: 1 } } },
+    { id: "s_drops", icon: "✨", name: "Find 30 mining drops", desc: "Items and crates found by your miners.", metric: "drops", target: 30, reward: { crates: 4 } },
+    { id: "s_item", icon: "🔨", name: "Try 60 item upgrades", metric: "itemUp", target: 60, reward: { cash: 120, cashMin: 20000, bag: { boost_power: 1 } } },
+    { id: "s_floors", icon: "⛏️", name: "Unlock 20 floors", metric: "floors", state: true, target: 20, reward: { mine: 100 } },
+    { id: "s_level", icon: "🎓", name: "Manager level 40", metric: "level", state: true, target: 40, reward: { crates: 3, bag: { boost_xp: 2 } } },
+    { id: "s_shards", icon: "💠", name: "Find 5 Mine Shards", metric: "shards", target: 5, reward: { mine: 150 } },
+    { id: "s_daily", icon: "📅", name: "Claim 14 daily rewards", metric: "dailyClaims", target: 14, reward: { mine: 100 } },
+  ];
+  // progress of one daily / seasonal quest: counters (prog) or live state (floors, manager level)
+  S.questMetric = (st, def, prog) => {
+    if (def.state) return def.metric === "floors" ? Math.max(st.mines.start.maxUnlocked || 0, st.mines.start.unlockedShaftCount) : st.hero.lvl;
+    return (prog && prog[def.metric]) || 0;
+  };
 
   // timings of the animated miners (also define how many ore trips happen per second)
   S.WALK = 1.5; S.SWING_N = 4; S.SWING_T = 0.35; S.DROP = 0.2;
@@ -72,7 +132,7 @@
     { id: "hold", icon: "💎", name: "Hold 50,000 $MINE", desc: "Have at least 50,000 $MINE in your game balance. Dropping below it pauses the reward.", target: 50000 },
     { id: "deposit", icon: "⬇️", name: "Deposit 50,000 $MINE", desc: "Deposit 50,000 $MINE in total from your wallet (Bank → Deposit).", target: 50000 },
     { id: "spend", icon: "🔥", name: "Spend 25,000 $MINE", desc: "Spend 25,000 $MINE in total inside the game: packs, boosts, item upgrades, backpack pages.", target: 25000 },
-    { id: "streak", icon: "⏳", name: "24h without withdrawing", desc: "Go 24 hours without a withdrawal. A new withdrawal restarts the clock.", target: 24 * 3600e3 },
+    { id: "streak", icon: "⏳", name: "24h without withdrawing", desc: "Done from the start for new players. Each withdrawal restarts a 24-hour clock; the quest is complete again once it runs out.", target: 24 * 3600e3 },
     { id: "social", icon: "🔗", name: "Link X and Discord", desc: "Link your X account and your Discord account.", target: 2 },
   ];
   S.questValue = (st, t, id) => {
@@ -81,7 +141,8 @@
       case "hold": return st.balance || 0;
       case "deposit": return q.deposited || 0;
       case "spend": return q.spent || 0;
-      case "streak": return Math.max(0, t - Math.max(st.lastWithdrawAt || 0, st.created || 0));
+      // never withdrawn = already done; after a withdrawal the 24 h clock starts from that moment
+      case "streak": return st.lastWithdrawAt ? Math.max(0, t - st.lastWithdrawAt) : 24 * 3600e3;
       case "social": return (q.x ? 1 : 0) + (q.discord ? 1 : 0);
     }
     return 0;
@@ -98,7 +159,6 @@
   S.minersFor = (lvl) => Math.min(4, 1 + Math.floor(lvl / 5));
   S.unitValue = (i, mine) => 1.5 * Math.pow(2.3, i) * mine.prestigeMult;
   S.infraScale = (mine) => Math.pow(1.9, mine.unlockedShaftCount - 1);
-  S.shaftUnlockCost = (floorIndex) => Math.floor(60 * Math.pow(2.8, floorIndex));
   S.upgradeCost = (base, level, n, costMult) => {
     let total = 0;
     for (let i = 0; i < n; i++) total += Math.floor(base * Math.pow(1.12, level + i) * costMult);
@@ -110,7 +170,9 @@
 
   // ---- hero / gear ----------------------------------------------------------------
   S.itemById = (st, id) => st.inv.find((i) => i.id === id);
-  S.itemPower = (it) => Math.round((it.v + it.aff.reduce((s, a) => s + a.v, 0)) * S.upMult(it) * 1000 * (it.dur ? 1 : 0.25));
+  // 0 durability = broken = unusable (no stats, no power, can't be equipped). Anything above 0 works at full strength.
+  S.usable = (it) => it.dur > 0;
+  S.itemPower = (it) => Math.round((it.v + it.aff.reduce((s, a) => s + a.v, 0)) * S.upMult(it) * 1000 * (S.usable(it) ? 1 : 0));
   S.sellValue = (it) => Math.ceil(35 * Math.pow(3.2, it.r) * (1 + 0.4 * (it.il - 1)) * (0.5 + (0.5 * it.dur) / it.max) * (1 + 0.15 * (it.up || 0)));
   S.repairCost = (it, mine, fx) => Math.ceil((it.max - it.dur) * 0.8 * Math.pow(3, it.r) * S.infraScale(mine) * (1 - fx.repair));
   S.canEquip = (st, it) => it.il <= st.hero.lvl;
@@ -122,7 +184,8 @@
     for (const s of S.SLOTS) {
       const it = S.itemById(st, st.eq[s]);
       if (!it) continue;
-      const q = (it.dur > 0 ? 1 : 0.25) * S.upMult(it); // broken gear works at 25 %
+      if (!S.usable(it)) continue;                      // broken gear (0 durability) gives nothing until repaired
+      const q = S.upMult(it);
       f[S.SLOT_STAT[s][0]] += it.v * q;
       it.aff.forEach((a) => (f[a.k] += a.v * q));
     }

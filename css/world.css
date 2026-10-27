@@ -101,10 +101,5 @@
 .cash-particle{position:absolute;font-size:.7rem;font-weight:900;color:#a5d6a7;animation:float-up 1.2s ease forwards;pointer-events:none;text-shadow:0 1px 4px rgba(0,0,0,.6);z-index:9}
 @keyframes float-up{0%{opacity:1}100%{opacity:0;transform:translateY(-50px) scale(.7)}}
 /* overlays on the game view */
-.tput{position:absolute;right:6px;top:44px;z-index:12;width:124px;padding:4px 6px;border-radius:8px;background:rgba(0,0,0,.55);font-size:.55rem;font-weight:800;pointer-events:none}
-.tp-row{position:relative;display:flex;justify-content:space-between;gap:4px;height:13px;line-height:13px;margin:2px 0;overflow:hidden;border-radius:3px}
-.tp-row i{position:absolute;left:0;top:0;bottom:0;width:0;background:rgba(76,175,80,.55)}
-.tp-row span,.tp-row em{position:relative;font-style:normal}
-.tp-row.low i{background:rgba(244,67,54,.75);animation:pulse-bar 1s ease infinite}@keyframes pulse-bar{50%{opacity:.5}}
-.bottleneck-warning{position:absolute;left:50%;bottom:14px;transform:translateX(-50%);z-index:15;max-width:90%;text-align:center;padding:10px 20px;border-radius:14px;background:rgba(211,47,47,.95);border:2px solid #ffcdd2;font-size:1rem;font-weight:900;box-shadow:0 4px 16px rgba(0,0,0,.5);pointer-events:none;animation:pulse 1.2s ease infinite}
+/* income panel + bottleneck pill: see css/extras.css */
 @keyframes pulse{50%{opacity:.75}}

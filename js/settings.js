@@ -37,7 +37,7 @@ function openSettings() {
     doLogout();
   };
   $("set-reset").onclick = () => typedConfirm("↺ Reset progress?",
-    "Cash, floors, hero level, gear, backpack and unclaimed rewards go back to the start. Your wallet, username, packs, <b>$MINE balance</b>, boosts and quest progress are kept.", "RESET", "Reset progress", resetProgress);
+    "Cash, floors, manager level, gear, backpack, Mine Shards and unclaimed rewards go back to the start. Your wallet, username, packs, <b>$MINE balance</b>, boosts and quest progress are kept.", "RESET", "Reset progress", resetProgress);
   $("set-delete").onclick = () => typedConfirm("🗑 Delete account?",
     state.guest ? "This permanently deletes your guest account and all its progress." : "This permanently deletes your account, its progress and the packs you bought. You must withdraw or spend your $MINE first.", "DELETE", "Delete forever", deleteAccount);
 }
