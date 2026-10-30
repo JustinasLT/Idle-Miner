@@ -51,7 +51,8 @@ function fakeChain() {
   let clock = 0; const step = (ms) => { clock += ms; game.setClock(clock); };
   const near = (a, b, tol = 0.01) => Math.abs(a - b) <= Math.abs(b) * tol + 1e-9;
   // gives a player every quest: hold 50k, deposited 50k, spent 25k, X + Discord linked, 24 h without a withdrawal
-  const finishQuests = (p) => { p.balance = Math.max(p.balance, 50000); p.q.depDone = true; p.q.spent = 25000; p.q.x = "x" + p.id; p.q.discord = "d" + p.id; p.created -= 2 * 864e5; };
+  const HOLD_T = () => S.QUESTS.find((q) => q.id === "hold").target, SPEND_T = () => S.QUESTS.find((q) => q.id === "spend").target;   // scaled with the season budget
+  const finishQuests = (p) => { p.balance = Math.max(p.balance, HOLD_T()); p.q.depDone = true; p.q.spent = SPEND_T(); p.q.x = "x" + p.id; p.q.discord = "d" + p.id; p.created -= 2 * 864e5; };
   const totalXp = (h) => { let x = h.xp; for (let l = 1; l < h.lvl; l++) x += S.xpNeed(l); return x; };
 
   console.log("chain verification rules");
@@ -486,22 +487,90 @@ function fakeChain() {
     assert((await act(pt, { type: "upgradeItem", id: S.itemById(q, q.eq.Shoes).id })).s === 400, "can't upgrade somebody else's item");
     forcedRoll = null;
   });
-  await T("upgraded gear is protected from 'Sell all' and sells for more", async () => {
+  await T("upgraded gear sells for more, and 'Sell all' no longer protects it (only locked + equipped survive)", async () => {
     const q = game.createPlayer("Seller"); game.touchPlayer(q);
     const mk = (id, up) => ({ id, slot: "Ring", r: 0, il: 1, v: 0.01, dur: 100, max: 100, aff: [], lock: false, up });
     q.inv.push(mk(900, 0), mk(901, 3));
     assert(S.sellValue(mk(1, 3)) > S.sellValue(mk(1, 0)));
     game.act(q, { type: "sellAll" });
-    assert(!q.inv.some((i) => i.id === 900) && q.inv.some((i) => i.id === 901), "plain item sold, +3 item kept");
+    assert(!q.inv.some((i) => i.id === 900) && !q.inv.some((i) => i.id === 901), "plain AND upgraded items are sold");
+  });
+  await T("item drop level is Manager level +-ITEM_LVL_SPREAD (5), never below 1, at low and high levels", async () => {
+    assert(S.ITEM_LVL_SPREAD === 5, "named tunable is 5");
+    assert(S.itemLevelFor(50, 0) === 45 && S.itemLevelFor(50, 0.999999) === 55 && S.itemLevelFor(1, 0) === 1 && S.itemLevelFor(1, 0.999999) === 6, "edges of the uniform roll");
+    for (const lvl of [1, 2, 4, 5, 6, 7, 40, 99, 100]) {
+      let mn = Infinity, mx = -Infinity;
+      for (let k = 0; k < 30000; k++) { const il = S.itemLevelFor(lvl, Math.random()); mn = Math.min(mn, il); mx = Math.max(mx, il); }
+      assert(mn === Math.max(1, lvl - 5) && mx === lvl + 5, "level " + lvl + " rolled " + mn + ".." + mx);
+    }
+    // the same rule through the real server path (crates use the same roll as mining drops)
+    for (const lvl of [1, 3, 8, 60, 100]) {
+      const q = game.createPlayer("Roller" + lvl); q.hero.lvl = lvl; q.hero.crates = 40; q.invPages = 5;
+      const before = new Set(q.inv.map((i) => i.id));
+      for (let k = 0; k < 40; k++) game.act(q, { type: "crate", slot: "Ring" });
+      const fresh = q.inv.filter((i) => !before.has(i.id));
+      assert(fresh.length === 40, "40 crates opened");
+      assert(fresh.every((i) => i.il >= Math.max(1, lvl - 5) && i.il <= lvl + 5), "crate item levels at Manager level " + lvl + ": " + fresh.map((i) => i.il).join(","));
+    }
+  });
+  await T("coin economy: fast start kept (first upgrade ~10 s, floor 2 ~1 min, floor 3 ~3 min), mid/late game slowed, coin curve lines up with the Power gate", async () => {
+    const cost = (i) => S.shaftUnlockCost(i, null).cash;
+    assert(cost(0) === 60 && cost(1) === 168 && cost(2) === 470, "floors 1-3 keep the original prices");
+    for (let i = 1; i < 30; i++) assert(cost(i) > cost(i - 1), "floor prices strictly grow at floor " + (i + 1));
+    assert(cost(3) === Math.floor(S.UNLOCK_BASE * Math.pow(S.UNLOCK_GROWTH, 3) * S.UNLOCK_STEEP_JUMP), "floor 4 carries the one-time steep jump");
+    assert(S.shaftUnlockCost(5, { maxUnlocked: 8 }).mine === 0 && S.shaftUnlockCost(5, { maxUnlocked: 8 }).cash === cost(5), "re-unlocking an owned floor is still coins only");
+    const sim = require("../scripts/economy-sim.js"), res = sim.run(200 * 3600), pt = sim.powerTimes();
+    assert(res.firstBuy <= 10, "first purchase within 10 s: " + res.firstBuy);
+    assert(res.floorAt[2] <= 60 && res.floorAt[3] <= 180, "floor 2 within 1 min, floor 3 within 3 min: " + res.floorAt[2] + " / " + res.floorAt[3]);
+    assert(res.floorAt[10] >= 10 * 60, "floor 10 no sooner than 10 min (was 54 s): " + res.floorAt[10]);
+    assert(res.floorAt[20] >= 2 * 3600 && res.floorAt[30] >= 24 * 3600, "floors 20 / 30 take hours / days (were 3 / 9 min): " + res.floorAt[20] + " / " + res.floorAt[30]);
+    for (let n = 6; n <= 25; n++) { const k = pt[n] / res.floorAt[n]; assert(k > 0.25 && k < 4, "coin wall and Power wall for floor " + n + " are within 4x of each other: " + k.toFixed(2)); }
+    assert(res.snaps.length === 4 && res.snaps[2].floors <= 18, "after an hour a new player owns at most 18 floors: " + res.snaps[2].floors);
+    // the pricing must be the SAME maths on the client: formulas.js uses Shared.shaftUnlockCost / Shared.upgradeCost, never its own copy
+    assert(!/Math\.pow\(2\.8|Math\.pow\(1\.12/.test(fs.readFileSync(path.join(__dirname, "..", "js", "formulas.js"), "utf8") + fs.readFileSync(path.join(__dirname, "..", "js", "floors.js"), "utf8")), "no private copy of the cost curves in the client");
+  });
+  await T("coin changes do not touch $AFKMINE emission; offline cash still equals 50 % of the income formula", async () => {
+    const a = game.createPlayer("EmitA"), b = game.createPlayer("EmitB"); game.touchPlayer(a); game.touchPlayer(b);
+    b.inv = JSON.parse(JSON.stringify(a.inv)); b.eq = { ...a.eq }; b.power = a.power = S.heroPower(a);
+    const m = b.mines.start; m.unlockedShaftCount = m.maxUnlocked = 25; m.shafts.forEach((sh) => (sh.level = 40)); m.warehouse.level = 200; m.elevator.level = 200; b.cash = 1e15;
+    assert(S.income(b, game.now()).perSec > 1000 * S.income(a, game.now()).perSec, "B earns far more coins");
+    game.touchPlayer(a); game.touchPlayer(b);
+    const ma = game.mining(a), mb = game.mining(b);
+    assert(ma.share > 0 && Math.abs(ma.share - mb.share) < 1e-12, "same power + same boosts = same share of the $AFKMINE pool, whatever the coin income: " + ma.share + " vs " + mb.share);
+    const q = game.createPlayer("OffRate"); finishQuests(q); game.touchPlayer(q);
+    const perSec = S.income(q, game.now()).perSec, p0 = q.pendingOffline;
+    step(3600e3); game.touchPlayer(q);
+    assert(near(q.pendingOffline - p0, perSec * 3600 * C.OFFLINE_CASH_RATE, 0.02), "1 h away with Offline Earnings pays 50 % of the income formula: " + (q.pendingOffline - p0) + " vs " + perSec * 1800);
+  });
+  await T("Sell all: sells everything except locked and equipped items; the server recomputes coins and count and ignores client numbers", async () => {
+    const q = game.createPlayer("SellAll"), tok = game.newSession(q); game.touchPlayer(q);
+    const mk = (id, slot, r, il, up, lock) => ({ id, slot, r, il, v: 0.05, dur: 100, max: 100, aff: [], lock: !!lock, up });
+    const eqStarter = Object.values(q.eq).slice();
+    const keepLocked = mk(950, "Ring", 4, 10, 2, true), keepEq = mk(951, "Amulet", 5, 1, 0, false);
+    const sell = [mk(952, "Ring", 0, 1, 0), mk(953, "Ring", 2, 5, 1), mk(954, "Gloves", 3, 8, 6), mk(955, "Pants", 5, 12, 10), mk(956, "Shirt", 1, 3, 0)];
+    q.inv.push(keepLocked, keepEq, ...sell); q.eq.Amulet = keepEq.id; q.hero.lvl = 1;
+    const expected = sell.reduce((s, i) => s + S.sellValue(i), 0), upgraded = sell.filter((i) => i.up).length;
+    const pv = S.sellAllPreview(q);
+    assert(pv.count === 5 && pv.coins === expected && pv.upgraded === upgraded, "preview matches: " + JSON.stringify({ c: pv.count, coins: pv.coins, up: pv.upgraded }));
+    const cash0 = q.cash;
+    const r = await act(tok, { type: "sellAll", coins: 1e12, count: 999, ids: [keepLocked.id, keepEq.id], upgraded: 0 });   // client lies: ignored
+    assert(r.s === 200 && r.j.sold.count === 5 && r.j.sold.coins === expected && r.j.sold.upgraded === upgraded, JSON.stringify(r.j));
+    assert(q.cash - cash0 >= expected && q.cash - cash0 < expected + 50, "paid exactly the sum of the sold items' sell values: " + (q.cash - cash0) + " vs " + expected);
+    assert(q.inv.some((i) => i.id === keepLocked.id) && q.inv.some((i) => i.id === keepEq.id), "locked and equipped survive (even Legendary/Mythic and upgraded)");
+    assert(eqStarter.every((id) => q.inv.some((i) => i.id === id)), "starter gear that is equipped survives");
+    assert(sell.every((i) => !q.inv.includes(i)), "everything else is gone, including +10 and Mythic");
+    assert(q.inv.length === eqStarter.length + 2, "only equipped + locked remain");
+    const again = await act(tok, { type: "sellAll" });
+    assert(again.s === 400 && /locked and equipped/i.test(again.j.error), "nothing left to sell: " + JSON.stringify(again.j));
   });
   await T("quests: +10 % earnings each (max +50 %), Offline Earnings only with all five", async () => {
     const q = game.createPlayer("Quester"); game.touchPlayer(q); const t = () => game.now();
     const base = S.income(q, t()).base;
     const boost = () => Math.round(S.earnBoost(q, t()) * 100);
     assert(boost() === 10 && S.questsDone(q, t()) === 1 && !S.offlineUnlocked(q, t()), "a new player already has the '24h without withdrawing' quest done");
-    q.balance = 49999; assert(boost() === 10, "1 short of holding 50k"); q.balance = 50000; assert(boost() === 20, "hold 50k");
+    q.balance = HOLD_T() - 1; assert(boost() === 10, "1 short of the hold threshold"); q.balance = HOLD_T(); assert(boost() === 20, "hold " + HOLD_T());
     q.tradeStats.depositedLamports = 499999999; assert(boost() === 20, "1 lamport short of 0.5 SOL"); q.tradeStats.depositedLamports = 5e8; assert(boost() === 30, "deposit 0.5 SOL");
-    q.q.spent = 24999; assert(boost() === 30); q.q.spent = 25000; assert(boost() === 40, "spend 25k");
+    q.q.spent = SPEND_T() - 1; assert(boost() === 30); q.q.spent = SPEND_T(); assert(boost() === 40, "spend " + SPEND_T());
     q.lastWithdrawAt = t() - 23 * 3600e3; assert(boost() === 30, "23 h after a withdrawal is not enough");
     q.lastWithdrawAt = t() - 25 * 3600e3; assert(boost() === 40, "24 h after a withdrawal");
     q.lastWithdrawAt = t() - 3600e3; assert(boost() === 30, "a withdrawal restarts the clock");
@@ -664,7 +733,7 @@ function fakeChain() {
     assert(sv().find((x) => x.id === "s_lvls").value === 10 && sv().find((x) => x.id === "s_item").value === 2 && sv().find((x) => x.id === "s_play").value >= 1800);
     assert(refuse("season", "s_floors") && refuse("season", "s_level"));
     q.mines.start.maxUnlocked = 20; q.hero.lvl = 40;
-    const b0 = q.balance; assert(claim("season", "s_floors").mine === 100 && q.balance - b0 === 100, "seasonal $AFKMINE reward");
+    const b0 = q.balance, sfm = S.SEASON_QUESTS.find((x) => x.id === "s_floors").reward.mine; assert(sfm === 10 && claim("season", "s_floors").mine === sfm && q.balance - b0 === sfm, "seasonal $AFKMINE reward (100 x 0.1 scale)");
     const cr3 = q.hero.crates, xb3 = q.bag.boost_xp; claim("season", "s_level"); assert(q.hero.crates === cr3 + 3 && q.bag.boost_xp === xb3 + 2);
     toNextDay();
     assert(dq().items.every((x) => x.value === 0 && !x.claimed) && !dq().bonusClaimed, "daily quests reset at 00:00 UTC");
@@ -1066,6 +1135,64 @@ function fakeChain() {
     assert(r.j.ok, JSON.stringify(r.j));
     assert((await act(gTok, { type: "claimPrize" })).s === 400);
     game.db.season.start += 31 * 864e5;
+  });
+  await T("season budget: ONE budget derives the mining and prize pools and scales every $AFKMINE price, cap and reward by the same factor", async () => {
+    const K = C.SEASON_BUDGET / S.REF_BUDGET;
+    assert(C.SEASON_BUDGET === 1.5e6 && Math.abs(C.LB_POOL - 1e6) < 1e-6 && Math.abs(C.MINING_POOL - 5e5) < 1e-6 && Math.abs(C.LB_POOL + C.MINING_POOL - C.SEASON_BUDGET) < 1e-6, "1.5M budget = 1M prizes + 0.5M mining");
+    assert(Math.abs(C.DAILY - C.MINING_POOL / 30) < 1e-9 && C.MINE_SCALE === K && Math.abs(K - 0.1) < 1e-12, "daily mining pool is derived from the budget; scale = budget / 15M = 0.1");
+    assert(C.FREE_EARN_CAP === 2000 && C.ONBOARD_CAP === 2000 && C.DEV_MINE_AMOUNT === 1000, "free cap / fast-start cap / faucet scaled (were 20,000 / 20,000 / 10,000)");
+    assert(PRICES.boost_xp === 50 && PRICES.boost_earn === 40 && PRICES.boost_power === 60, "shop boosts 500/400/600 -> 50/40/60");
+    assert(S.UNLOCK_MINE[0] === 4 && S.UNLOCK_MINE[19] === 200 && S.PAGE_COST.join() === "0,30,80,200,500", "floor unlock + backpack page prices scaled");
+    assert(S.DAILY_REWARDS[6].mine === 500 && S.QUESTS.find((q) => q.id === "hold").target === 5000 && S.QUESTS.find((q) => q.id === "spend").target === 2500, "day-7 daily 5,000 -> 500; hold 50k -> 5,000; spend 25k -> 2,500");
+    assert(/5,000/.test(S.QUESTS[0].name) && /2,500/.test(S.QUESTS[2].name), "quest texts follow the scale");
+    const up = S.upgradeInfo({ up: 3, r: 0, il: 1 }, { unlockedShaftCount: 1 }); assert(up.mine === 1, "item upgrade $AFKMINE price scaled (0.5 rounds up to 1)");
+    // the same code path the browser uses: a different scale rebuilds the tables in place, back to the default afterwards
+    S.applyMineScale(1); assert(S.UNLOCK_MINE[0] === 40 && S.PAGE_COST[4] === 5000 && S.QUESTS[0].target === 50000 && S.DAILY_REWARDS[6].mine === 5000, "scale 1 = the original economy");
+    S.applyMineScale(K); assert(S.UNLOCK_MINE[0] === 4 && S.QUESTS[0].target === 5000, "and back");
+    // free players still hit the wall in the same time as before: fast-start rate x scale
+    assert(Math.abs(C.ONBOARD_RATE * C.ONBOARD_MINUTES * 60 - C.ONBOARD_CAP) < 1e-6 && C.ONBOARD_MINUTES === 90, "free cap is reached after ~90 min of active play");
+  });
+  await T("season payout: prizes come in tiers (1 / 2-10 / 11-100), never exceed the pool, rank 1 is sellable within one day of the sell cap, and solvency (assets >= liabilities) is untouched", async () => {
+    const mkPaid = (i) => { const p = game.createPlayer("Prize" + i); game.touchPlayer(p); p.packs = { 1: 1 }; p.items = 5000 - i * 10; p.power = S.heroPower(p); return p; };
+    const bust = async () => { const d = game.createPlayer("CacheBuster"); await game.deleteAccount(d); };       // drops the 3 s leaderboard cache
+    const ps = Array.from({ length: 108 }, (_, i) => mkPaid(i));
+    const rich = ps[0]; rich.solBalance = 3e9; game.db.treasury.depositsIn += 5e9;                              // some real liabilities and assets to protect
+    const cap0 = C.PRIZE_CIRC_CAP_PCT, savedPool = game.db.season.prizePool;
+    const spot = S.spotPrice(BigInt(C.POOL_INIT_LAMPORTS), BigInt(C.POOL_INIT_MICRO));
+    try {
+      // --- 1) cap off: the full 1M prize pool ---
+      C.PRIZE_CIRC_CAP_PCT = 0; game.db.season.prizePool = null; await bust();
+      game.db.season.start -= 31 * 864e5;
+      const sw = (A) => A.reduce((s, x) => s + x, 0);
+      const svPre = game.solvency();
+      let paid = [], bal0 = ps.map((p) => p.balance);
+      for (const p of ps) paid.push(game.act(p, { type: "claimPrize" }).paid);
+      const pool = game.db.season.prizePool;
+      assert(Math.abs(pool - C.LB_POOL) < 1e-6, "pool = " + pool);
+      assert(Math.abs(paid[0] - 80000) < 1e-6, "rank 1 = 8 % of 1M = 80,000: " + paid[0]);
+      assert(paid.slice(1, 10).every((x) => Math.abs(x - 320000 / 9) < 1e-6), "ranks 2-10 split 32 % equally");
+      assert(paid.slice(10, 100).every((x) => Math.abs(x - 600000 / 90) < 1e-6), "ranks 11-100 split 60 % equally");
+      assert(paid.slice(100).every((x) => x === 0), "rank 101+ gets nothing");
+      assert(sw(paid) <= pool + 1e-6 && Math.abs(sw(paid) - pool) < 1e-6, "total paid " + sw(paid) + " never exceeds the pool " + pool);
+      assert(ps.every((p, i) => Math.abs(p.balance - bal0[i] - paid[i]) < 1e-9), "every prize is credited exactly once");
+      assert(Math.max(...paid) * spot <= C.DAILY_SELL_CAP_LAMPORTS_PER_PLAYER / 1e9 + 1e-9, "the biggest prize is worth at most one day of the sell cap at the starting price: " + (Math.max(...paid) * spot).toFixed(3) + " SOL");
+      const sv1 = game.solvency();
+      assert(sv1.ok && sv1.assets >= sv1.liabilities && sv1.assets === svPre.assets && sv1.liabilities === svPre.liabilities, "solvency unchanged by prizes: " + JSON.stringify({ a: sv1.assets, l: sv1.liabilities }));
+    } catch (e) { throw e; } finally { /* continue below */ }
+    // second claim is refused (above: act would have thrown on the repeat)
+    let st = 0; try { game.act(ps[0], { type: "claimPrize" }); } catch (e) { st = e.status; } assert(st === 400, "a prize can only be claimed once");
+    // --- 2) cap on: the pool is limited by the $AFKMINE in circulation when the season ends ---
+    game.db.season.start += 31 * 864e5; ps.forEach((p) => { p.claimed = false; p.balance = 0; });
+    C.PRIZE_CIRC_CAP_PCT = 0.0005; game.db.season.prizePool = null; ps[5].balance = 300000; await bust();
+    const circ = game.solvency().circulating;
+    game.db.season.start -= 31 * 864e5;
+    const paid2 = ps.map((p) => game.act(p, { type: "claimPrize" }).paid), pool2 = game.db.season.prizePool;
+    assert(Math.abs(pool2 - 0.0005 * circ) < 1 && pool2 < C.LB_POOL, "pool capped at a % of the circulating supply: " + pool2 + " vs " + 0.0005 * circ);
+    assert(paid2.reduce((s, x) => s + x, 0) <= pool2 + 1e-6, "total paid stays within the capped pool");
+    const sv2 = game.solvency(); assert(sv2.ok && sv2.assets >= sv2.liabilities, "solvency still OK after the capped payout");
+    game.db.season.start += 31 * 864e5; C.PRIZE_CIRC_CAP_PCT = cap0; game.db.season.prizePool = savedPool == null ? null : savedPool;
+    for (const p of ps) await game.deleteAccount(p).catch(() => {});
+    game.db.treasury.depositsIn -= 5e9;
   });
   // ======================= 2. power-gated floors =======================
   await T("floors below their Power requirement produce nothing (income, drops, shards), online and offline; leveling up switches them on", async () => {

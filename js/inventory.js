@@ -167,9 +167,9 @@ async function heroClick(e) {
     });
   }
   if (a === "sellall") {
-    const list = spareItems().filter((i) => !i.lock && !i.up && i.r <= 2);
-    if (!list.length) return toast("Nothing to sell — Epic+, upgraded and locked items are kept");
-    return confirmModal("Sell all?", `Sell ${list.length} unlocked item(s) up to Rare for ${formatMoney(list.reduce((s, i) => s + sellValue(i), 0))}? Epic and better, and upgraded items, are kept.`, "Sell", () => send({ type: "sellAll" }));
+    const pv = Shared.sellAllPreview(state);
+    if (!pv.count) return toast("Nothing to sell — locked and equipped items are kept");
+    return confirmModal("Sell all?", `Sell <b>${pv.count} item${pv.count === 1 ? "" : "s"}</b> for <b>${formatMoney(pv.coins)}</b> coins?${pv.upgraded ? ` <b>${pv.upgraded}</b> of them ${pv.upgraded === 1 ? "is" : "are"} upgraded (+N) — the upgrades are lost.` : ""} Locked and equipped items are kept.`, "Sell", () => send({ type: "sellAll" }));
   }
   if (a === "sort") return send({ type: "sort" });
   if (a === "auto") return send({ type: "autoEquip" });

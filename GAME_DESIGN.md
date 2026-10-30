@@ -45,8 +45,9 @@ Currencies / resources: **Coins** (cash), **$AFKMINE** (in-game currency; code k
 ## 3. Systems and rules
 
 ### 3.1 Mine floors (unlock prices)
-- Coins for floor *n* (1-based): `60 × 2.8^(n-1)`. (`S.shaftUnlockCost` in shared.js)
-- Floors **1-10**: coins only. Floors **11-20**: coins + **$AFKMINE** (`S.UNLOCK_MINE` **[tunable]**: 40 … 560). Floors **21-30**: coins + $AFKMINE (450 … 2000) + **Mine Shards** (`S.UNLOCK_SHARDS` **[tunable]**: 2,3,4,5,6,8,10,12,15,20).
+- Coins for floor *n* (1-based): `floor(UNLOCK_BASE × UNLOCK_GROWTH^(n-1) × unlockSteep(n))` = `60 × 2.8^(n-1)`, times a one-time **steep step** from floor 4 on: `unlockSteep(n) = UNLOCK_STEEP_JUMP × UNLOCK_STEEP_GROWTH^(n-4)` (60 × 1.18^(n-4)). Floors 1-3 cost 60 / 168 / 470 (early game stays fast), floor 4 jumps to ~28k. Knobs **[tunable]** in `js/shared.js`: `UNLOCK_BASE 60, UNLOCK_GROWTH 2.8, UNLOCK_STEEP_FROM 4, UNLOCK_STEEP_JUMP 60, UNLOCK_STEEP_GROWTH 1.18`. (`S.shaftUnlockCost`, `S.unlockSteep`)
+- Upgrade level cost grows by `S.LEVEL_GROWTH` (1.15) per level **[tunable]** (`S.upgradeCost`). Targets for a new player (`node scripts/economy-sim.js`): 2nd floor ~4 s, 3rd ~10 s (all ceilings: first upgrade ≤10 s, floor 2 ≤1 min, floor 3 ≤3 min), floor 10 ~24 min, floor 20 ~4.3 h, floor 30 ~3.8 days; 14 floors at minute 60, ~23 at day 1.
+- Floors **1-10**: coins only. Floors **11-20**: coins + **$AFKMINE** (`S.UNLOCK_MINE` **[tunable]**, base values 40 … 560 × the season scale = 4 … 56). Floors **21-30**: coins + $AFKMINE (base 450 … 2000 = 45 … 200 scaled) + **Mine Shards** (`S.UNLOCK_SHARDS` **[tunable]**: 2,3,4,5,6,8,10,12,15,20).
 - **Upgrades** (floor, elevator, warehouse levels) cost **coins only**.
 - Floors already owned before (older save / prestige) are remembered in `mines.start.maxUnlocked` and only cost coins to re-unlock.
 - The unlock is atomic on the server: coins, $AFKMINE and shards are all checked and deducted together.
@@ -59,8 +60,12 @@ Currencies / resources: **Coins** (cash), **$AFKMINE** (in-game currency; code k
 ### 3.3 Bag and boosts
 - Bag items (`S.BAG_ITEMS`): `shards`, `boost_xp`, `boost_earn`, `boost_power`.
 - **Shop boosts are items.** Buying (`buy` action) charges $AFKMINE and adds 1 to the bag; nothing starts. The player presses **Use** (Shop or Manager → BAG → `useItem` action) to start a 2-hour boost (`S.BOOST_MINUTES`); using again adds 2 h, max 12 h stacked.
-- Boosts: XP +100% manager XP, Earnings +50% (cash and $AFKMINE share, adds to quest boost), Power +100% manager power for the $AFKMINE share. Prices: `PRICES` in config.js **[tunable]** (500 / 400 / 600 $AFKMINE).
+- Boosts: XP +100% manager XP, Earnings +50% (cash and $AFKMINE share, adds to quest boost), Power +100% manager power for the $AFKMINE share. Prices: `PRICES` in config.js **[tunable]** (base 500 / 400 / 600, × the season scale = **50 / 40 / 60** $AFKMINE).
 - Boosts can also be won as quest / daily rewards.
+
+### 3.3b Item drops and Sell All
+- Dropped item level = Manager level ± `S.ITEM_LVL_SPREAD` (**5**, was 10), never below 1 (`S.itemLevelFor`, uniform roll).
+- **Sell All** sells every item that is NOT locked and NOT equipped. The client asks "Sell X items for Y coins" and shows how many are upgraded (+N); the server recomputes everything (`S.sellAllPreview`) and ignores client numbers.
 
 ### 3.4 Durability
 - Gear has `dur` 0-100%. **At 0% the item is unusable**: gives no stats, cannot be equipped, auto-equip skips it. **Any value above 0% works at full strength.** Repair (single or all) costs coins. (`S.usable`)
@@ -70,14 +75,14 @@ Currencies / resources: **Coins** (cash), **$AFKMINE** (in-game currency; code k
 - Offline now includes **$AFKMINE, items, crates and Mine Shards**, not just coins. The server accumulates them in `offAcc`; the "Welcome back" popup shows them (`view.offline.away`). Coins are paid on Collect, $AFKMINE goes straight to the balance, loot waits in "Claim mining rewards".
 
 ### 3.6 Daily reward
-- 7-day streak calendar (`S.DAILY_REWARDS` **[tunable]**): day 1 coins, 2 crate, 3 coins, 4 XP Boost, 5 coins, 6 coins + 2 crates, **day 7 = 250 $AFKMINE**. Coin rewards scale with the player's income (minutes of income, with a minimum).
+- 7-day streak calendar (`S.DAILY_REWARDS` **[tunable]**): day 1 coins, 2 crate, 3 coins, 4 XP Boost, 5 coins, 6 coins + 2 crates, **day 7 = 500 $AFKMINE** (base 5,000 × scale; the old doc value 250 was out of date). Coin rewards scale with the player's income (minutes of income, with a minimum).
 - Claim once per UTC day. Missing a day resets to day 1. State: `p.daily`.
 
 ### 3.7 Quests
 - **Daily quests** (reset 00:00 UTC, `S.DAILY_QUESTS`): play 30 min, buy 10 upgrade levels, try 2 item upgrades, repair gear. Finishing all four unlocks a **bonus** (`S.DAILY_BONUS`).
-- **Seasonal quests** (30 days, `S.SEASON_QUESTS`): play 10 h, 1,500 levels, 30 drops, 60 item upgrades, unlock 20 floors, manager level 40, 5 shards, 14 daily claims. Rewards include $AFKMINE.
+- **Seasonal quests** (30 days, `S.SEASON_QUESTS`): play 10 h, 1,000 upgrade levels, 30 drops, 60 item upgrades, unlock 20 floors, manager level 40, 5 shards, 14 daily claims. Rewards include $AFKMINE.
 - Progress counters are updated by the server in `bumpQ`; rewards are granted in `grant`. UI: `js/quests.js`.
-- **Boost quests** (the older "Earnings Boost" set, +10% each, max +50%): hold 50k $AFKMINE, deposit 50k, spend 25k, 24 h without withdrawing, link X/Discord. The **"24 h without withdrawals"** quest is **already complete** for new players: it counts from the last withdrawal, and if the player never withdrew it is done (`questMetric` "streak").
+- **Boost quests** (the older "Earnings Boost" set, +10% each, max +50%): hold 5,000 $AFKMINE (base 50k × scale), deposit 0.5 SOL, spend 2,500 (base 25k × scale), 24 h without withdrawing, link X/Discord. The **"24 h without withdrawals"** quest is **already complete** for new players: it counts from the last withdrawal, and if the player never withdrew it is done (`questMetric` "streak").
 
 ### 3.8 Referrals (tiers, manual weekly payout)
 - Each player has a `refCode`; link `https://<site>/?ref=CODE`, stored by the browser and sent on first login (`createPlayer` links `referredBy`).
@@ -91,6 +96,7 @@ Currencies / resources: **Coins** (cash), **$AFKMINE** (in-game currency; code k
 - `p.tags`: **og** (golden, Season 0; granted once at the first start of this version to accounts created before `SEASON0_CUTOFF`, minus `db.admin.ogExcluded`), **ref2** (silver), **ref3** (premium), permanent once reached (`tierMax`). Shown on the season AND referral leaderboards: OG first, then the highest referral tag. Styles in `css/extras.css` (`.tag.og/.ref2/.ref3`).
 
 ### 3.9 Income panel and bottleneck
+- Upgrade buttons sit in the world: the elevator button on TOP of the elevator (`.el-panel`), the warehouse button ABOVE the warehouse (`.wh-panel`), like the floor buttons. The elevator cab shows a 👷 worker (the miner sprite) that walks while the cab moves. The HUD no longer shows a shard counter; shards appear as `have X / need Y` on the unlock button of floors 21-30, in Manager → BAG and in the claim popup.
 - 📊 button on the mine screen opens the **income per minute** panel (mines / elevator / warehouse bars, closeable, remembered). The **bottleneck** warning is a small pill with an ✕ (hidden for 10 min when closed).
 
 ### 3.10 Economy: $AFKMINE, SOL, pool, treasury
@@ -100,9 +106,10 @@ Currencies / resources: **Coins** (cash), **$AFKMINE** (in-game currency; code k
 - **Treasury ledger** (`db.treasury`): `depositsIn, withdrawnNet, withdrawFees, packRevenue, referralPaid, legacyPacks`. assets = depositsIn - withdrawnNet; liabilities = sum of player SOL balances. **Invariant: assets >= liabilities** (liabilities include SOL locked in pending/failed withdrawals). Admin: `GET /api/admin/solvency` (needs `ADMIN_KEY`), plus a log line at start and every 10 min.
 - **Emission**: `EMISSION_MODE=mint` (rewards minted into balances, `circulating` tracked and shown) or `reserve` (finite stock). **Sinks** (`ECONOMY_SINK_MODE`): `burn` or `recycle` into the pool. All go through `mint()`/`sink()`/`debitMine()`.
 - **Packs**: SOL price fixed (`PACKS`), $AFKMINE price dynamic = SOL price -10% at the market price (`S.packMicroPrice`), buyer may pass `maxMine` (409 if the price moved).
-- **Free tier**: earns up to 20,000 $AFKMINE (`FREE_EARN_CAP`), then earning stops until any pack is bought.
+- **Free tier**: earns up to **2,000** $AFKMINE (`FREE_EARN_CAP` = 20,000 × scale), then earning stops until any pack is bought. The cap is deliberately below the cheapest pack's $AFKMINE price (~4,500 at the start price), so a free player cannot buy a pack with mined tokens alone.
 - **Withdrawals** (SOL only, **manual approval**): 0.05-2 SOL, 20% fee, 24 h cooldown, no guests. A request locks the funds (`pending`, still a liability); an admin approves (checks the on-chain balance, books the ledger, queues the send) or rejects with a reason (full refund, cooldown restored). States shown to players: pending / approved / sent / rejected / failed. A failed send stays locked until the admin chooses retry or refund. Approve is idempotent (second call = 409). Old token withdrawals: queued ones were refunded as $AFKMINE; sent ones are polled and refunded only on failure/expiry.
-- **Season**: 30 days, leaderboard prizes from a $AFKMINE pool.
+- **Season budget** (one knob): `SEASON_BUDGET` (env, default **1,500,000** $AFKMINE) = mining pool + prize pool. `PRIZE_SHARE` (default 2/3) → prize pool `LB_POOL` = 1,000,000; the rest `MINING_POOL` = 500,000 → `DAILY = MINING_POOL / 30` = 16,667/day, split among active players by weight (power × boosts; coins never matter; per-player cap `PLAYER_DAILY_CAP` 2.5% of DAILY; `FULL_PLAYERS` 100 for a full pool). `S.REF_BUDGET` (15M) is the budget the base $AFKMINE prices in shared.js were written for; **scale `MINE_K = SEASON_BUDGET / REF_BUDGET` (0.1)** multiplies every price/cap/reward paid in $AFKMINE: `S.UNLOCK_MINE`, `S.PAGE_COST`, `S.UP_MINE`, day-7 daily, seasonal quest rewards, hold/spend quest thresholds (all via `S.applyMineScale`, which the client also runs from `view.season.mineScale`), plus `FREE_EARN_CAP`, `ONBOARD_CAP`, the dev faucet and shop `PRICES` (config.js `kScaled`). Pack $AFKMINE prices follow the market, not the scale.
+- **Prizes** (`C.LB_TIERS`, equal split inside a tier, rank 101+ nothing): rank 1 = 8% (80,000 = 0.8 SOL at the start price), ranks 2-10 = 32% (35,556 each), ranks 11-100 = 60% (6,667 each). Nobody holds more than one day of the 1 SOL/day sell cap at the start price. The pool is `min(LB_POOL, PRIZE_CIRC_CAP_PCT × circulating supply)` (default 100% = off in practice; set e.g. 0.5 to cap at half the supply) and is frozen when the season ends (`db.season.prizePool`). Prizes are minted, no SOL moves, so assets ≥ liabilities is unaffected (tested). `node scripts/season-sim.js [hours/day]` prints the 30-day free vs pack-buyer simulation, pack affordability and prize tiers; `SEASON_BUDGET=15000000` gives the old economy.
 - **Item upgrades** +1..+10, success 95% -> 7%, failure keeps the level but spends the price.
 - **Events tab**: placeholder "coming soon" (`#panel-events` in index.html).
 
@@ -132,7 +139,10 @@ Currencies / resources: **Coins** (cash), **$AFKMINE** (in-game currency; code k
 ## 6. Config knobs (where to change what)
 | Want to change | Edit |
 |---|---|
-| Floor prices ($AFKMINE / shards) | `S.UNLOCK_MINE`, `S.UNLOCK_SHARDS` in `js/shared.js` |
+| Whole $AFKMINE economy (mining + prizes) | `SEASON_BUDGET`, `PRIZE_SHARE`, `LB_TIERS`, `PRIZE_CIRC_CAP_PCT` in `server/config.js`; scale base `S.REF_BUDGET` in shared.js |
+| Coin economy (floor and level cost curves) | `S.UNLOCK_BASE/GROWTH/STEEP_*`, `S.LEVEL_GROWTH` in `js/shared.js`; check with `scripts/economy-sim.js` |
+| Item drop level spread | `S.ITEM_LVL_SPREAD` (±5 around the Manager level, min 1) |
+| Floor prices ($AFKMINE / shards) | `S.UNLOCK_MINE`, `S.UNLOCK_SHARDS` in `js/shared.js` (the $AFKMINE part is scaled) |
 | Shard drop rate / starting floor | `S.SHARD_P`, `S.SHARD_FROM`, `S.SHARD_DEPTH_BONUS` |
 | Daily rewards / quest lists & rewards | `S.DAILY_REWARDS`, `S.DAILY_QUESTS`, `S.DAILY_BONUS`, `S.SEASON_QUESTS` |
 | Shop boost prices | `PRICES` in `server/config.js` |
@@ -147,7 +157,7 @@ Currencies / resources: **Coins** (cash), **$AFKMINE** (in-game currency; code k
 | Chart candles | `CANDLE_MS, CANDLES_MAX, CHART_MAX_POINTS` |
 | OG tag cutoff | `SEASON0_CUTOFF` |
 | Offline rules | `OFFLINE_*`, `ACTIVE_MS` in config.js |
-| Free-tier cap, onboarding | `FREE_EARN_CAP`, `ONBOARD_*` |
+| Free-tier cap, onboarding | `FREE_EARN_CAP`, `ONBOARD_*` (scaled from the season budget) |
 | Texts / labels | `index.html`, `js/*.js` strings |
 | Styles of new screens, nametags | `css/extras.css` (admin: `css/admin.css`) |
 

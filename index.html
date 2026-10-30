@@ -32,7 +32,6 @@
       </div>
       <div class="hud-center">
         <div class="prestige-badge" id="prestige-badge" hidden><span>⭐</span><span>×<span id="prestige-mult">1</span></span></div>
-        <div class="shard-chip" id="shard-chip" hidden title="Mine Shards — open the Manager tab → BAG"><span>💠</span><b id="shard-count">0</b></div>
         <div class="boost-chips" id="boost-chips"></div>
       </div>
       <div class="hud-right">
@@ -84,20 +83,20 @@
               <span class="lvl-badge">Warehouse Lv <span id="wh-lvl">1</span></span>
               <button type="button" class="btn-upgrade big" data-upgrade="warehouse"><span>⬆ Upgrade</span><small id="wh-cost-1"></small></button>
             </div>
+            <div class="upgrade-panel el-panel">
+              <span class="el-lvl-badge" title="Elevator level">🛗 Lv <span id="el-lvl">1</span></span>
+              <button type="button" class="btn-upgrade big" data-upgrade="elevator"><span>⬆ Upgrade</span><small id="el-cost-1"></small></button>
+            </div>
           </section>
 
           <div class="underground"></div>
           <section class="elevator-shaft" id="zone-elevator">
             <div class="shaft-core" id="shaft-core"></div>
-            <div class="elevator-ui">
-              <span class="el-lvl-badge">Lv <span id="el-lvl">1</span></span>
-              <button type="button" class="btn-upgrade big" data-upgrade="elevator"><span>⬆ Upgrade</span><small id="el-cost-1"></small></button>
-            </div>
           </section>
           <div class="elevator-cable" id="elevator-cable"></div>
           <div class="elevator-car" id="elevator-car">
             <div class="elevator-load" id="elevator-load"></div>
-            <div class="elevator-icon-wrap">🛗</div>
+            <div class="actor elevator-op" id="elevator-op"><span class="a-body">👷</span></div>
           </div>
           <section class="mines" id="zone-mines"><div id="shafts-container"></div></section>
         </div>

@@ -8,6 +8,11 @@ function fmtLeft(ms) {
   const s = Math.floor(ms / 1000), d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60), x = s % 60;
   return `${d}d ${String(h).padStart(2, "0")}h ${String(m).padStart(2, "0")}m ${String(x).padStart(2, "0")}s`;
 }
+// "🥇 #1 ◈ 80,000 · #2–10 ◈ 35,556 each · #11–100 ◈ 6,667 each": what every tier of the prize pool pays (the server decides, this only displays)
+function tierLine(s) {
+  let from = 0;
+  return s.tiers.map((t) => { const n = t.to - from, a = (s.prizePool * t.share) / n, txt = (n === 1 ? "#" + t.to : "#" + (from + 1) + "–" + t.to) + " ◈ " + formatToken(a) + (n > 1 ? " each" : ""); from = t.to; return "<span>" + (t.to === 1 ? "🥇 " : "") + txt + "</span>"; }).join("");
+}
 async function renderRanks() {
   if (RANKS.tab === "ref") return renderRefTab();
   if (!ranksData) $("ranks-content").innerHTML = rankTabs() + `<p class="dim small" style="padding:20px;text-align:center">Loading leaderboard…</p>`;
@@ -25,11 +30,12 @@ async function renderRanks() {
   const claim = over && info && !claimed ? `<button type="button" class="btn-primary claim" data-r="claim">🏆 Claim ${mine.prize ? formatToken(mine.prize) + " $AFKMINE" : "(no prize this season)"}</button>` : over ? `<p class="dim small">Prize claimed ✓</p>` : "";
   const dayNo = Math.min(SEASON_DAYS, Math.floor((D.season.now - D.season.start) / 864e5) + 1);
   $("ranks-content").innerHTML = rankTabs() + `
-    <div class="season-hero"><small>SEASON 0 PRIZE POOL</small><b class="prize-big">◈ ${formatToken(LB_POOL + MINING_POOL)} $AFKMINE</b>
-      <div class="season-split"><span>🏆 ${formatToken(LB_POOL)} top ${LB_SIZE} prizes</span><span>⛏️ ${formatToken(MINING_POOL)} mining</span></div>
+    <div class="season-hero"><small>SEASON 0 PRIZE POOL</small><b class="prize-big">◈ ${formatToken(D.season.prizePool)} $AFKMINE</b>
+      <div class="season-split"><span>🏆 top ${LB_SIZE} prizes${D.season.prizePool < D.season.prizeMax - 1 ? " (max " + formatToken(D.season.prizeMax) + ", capped by the supply in circulation)" : ""}</span><span>⛏️ ${formatToken(D.season.miningPool)} mining</span></div>
+      <div class="season-split">${tierLine(D.season)}</div>
       <div class="season-timer"><small>${over ? "SEASON ENDED" : "TIME REMAINING"}</small><b id="season-left">${fmtLeft(seasonLeftMs())}</b></div>
       <i class="dur"><u style="width:${Math.min(100, ((D.season.now - D.season.start) / SEASON_MS) * 100)}%"></u></i>
-      <small class="dim">Day ${dayNo} of ${SEASON_DAYS} · ${D.players} active players · ${formatToken(D.minedAll)} / ${formatToken(MINING_POOL)} mined · part of ${formatToken(TOTAL_POOL)} total $AFKMINE</small></div>
+      <small class="dim">Day ${dayNo} of ${SEASON_DAYS} · ${D.players} active players · ${formatToken(D.minedAll)} / ${formatToken(D.season.miningPool)} mined</small></div>
     <div class="rank-me"><div><small>YOUR RANK</small><b>${mine.rank ? "#" + mine.rank : "–"}</b></div><div><small>POINTS</small><b>${fmtN(mine.pts)}</b></div><div><small>${over ? "PRIZE" : "PROJECTED PRIZE"}</small><b class="tokc">${mine.prize ? formatToken(mine.prize) : "–"}</b></div>
       <div><small>STAKE</small><b>${m.share * 100 < 0.01 ? "<0.01" : (m.share * 100).toFixed(2)}%</b></div></div>
     ${claim}

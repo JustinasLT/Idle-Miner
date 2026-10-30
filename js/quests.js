@@ -145,7 +145,6 @@ function setupQuests() {
   $("tput-btn").onclick = () => setTput($("tput").classList.contains("hidden"));
   $("tput-x").onclick = () => setTput(false);
   $("bn-x").onclick = () => { bnDismissed.kind = bottleneck; bnDismissed.until = Date.now() + 10 * 60e3; $("bottleneck").hidden = true; };
-  $("shard-chip").onclick = () => { INV.tab = "bag"; document.querySelector('.nav-btn[data-panel="hero"]').click(); };
   let open = false; try { open = localStorage.getItem(TPUT_KEY) === "1"; } catch { /* */ }
   setTput(open);
   refreshQuestUI();

@@ -1,18 +1,13 @@
 /* v3 additions: income panel, bottleneck pill, daily / quests / referral / bag screens, shard chip, offline summary */
 
-/* ---- HUD: Mine Shards chip ---- */
-.shard-chip{display:flex;align-items:center;gap:4px;font-size:.72rem;font-weight:900;padding:2px 9px;border-radius:999px;cursor:pointer;
-  background:linear-gradient(180deg,rgba(77,208,225,.25),rgba(0,96,100,.3));border:1px solid rgba(128,222,234,.6);box-shadow:0 0 8px rgba(77,208,225,.25)}
-.shard-chip b{color:#b2ebf2}
-
 /* ---- income per minute panel (opened with the 📊 button) ---- */
-.tput-btn{position:absolute;right:6px;top:44px;z-index:13;display:flex;flex-direction:column;align-items:center;gap:0;line-height:1;cursor:pointer;
+.tput-btn{position:absolute;right:6px;top:6px;z-index:13;display:flex;flex-direction:column;align-items:center;gap:0;line-height:1;cursor:pointer;
   padding:5px 8px 4px;border-radius:12px;color:#fff;font-size:1.05rem;border:2px solid rgba(255,255,255,.16);
   background:linear-gradient(180deg,rgba(46,35,26,.95),rgba(26,20,16,.95));box-shadow:0 3px 10px rgba(0,0,0,.45)}
 .tput-btn span{font-size:.5rem;font-weight:900;letter-spacing:.04em;opacity:.8;margin-top:1px}
 .tput-btn.on{border-color:var(--accent)}
 .tput-btn.warn{border-color:#ef5350;animation:claim-pulse 1.4s ease infinite}
-.tput{position:absolute;right:6px;top:92px;z-index:13;width:216px;padding:10px 11px 9px;border-radius:14px;color:#fff;
+.tput{position:absolute;right:6px;top:128px;z-index:13;width:216px;padding:10px 11px 9px;border-radius:14px;color:#fff;
   background:linear-gradient(180deg,rgba(46,35,26,.97),rgba(20,15,11,.97));border:2px solid rgba(255,152,0,.35);box-shadow:0 8px 22px rgba(0,0,0,.6);
   animation:modal-in .18s ease}
 .tput.hidden{display:none}
@@ -32,7 +27,7 @@
 .tput-note{margin-top:7px;padding-top:6px;border-top:1px solid rgba(255,255,255,.1);font-size:.62rem;font-weight:700;opacity:.8;line-height:1.3}
 
 /* ---- bottleneck: a small pill you can close ---- */
-.bottleneck-warning{position:absolute;left:6px;top:44px;z-index:15;max-width:calc(100% - 96px);display:flex;align-items:center;gap:6px;
+.bottleneck-warning{position:absolute;left:calc(var(--elevator-width) + 6px);top:6px;z-index:15;max-width:calc(100% - var(--elevator-width) - 66px);display:flex;align-items:center;gap:6px;
   padding:4px 4px 4px 10px;border-radius:999px;background:rgba(183,28,28,.92);border:1px solid #ffcdd2;font-size:.64rem;font-weight:900;box-shadow:0 2px 8px rgba(0,0,0,.5)}
 .bottleneck-warning span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .bottleneck-warning button{flex-shrink:0;border:none;background:rgba(0,0,0,.3);color:#fff;width:20px;height:20px;border-radius:50%;font-size:.6rem;font-weight:900;cursor:pointer}
@@ -174,7 +169,7 @@
 .floor.gated .floor-inc{color:#9e9e9e}
 .floor-need{display:none;margin-left:auto;font-size:.62rem;font-weight:900;color:#ffcc80}
 .floor.gated .floor-need{display:inline}
-.gate-pill{position:absolute;left:6px;top:70px;z-index:5;padding:3px 9px;border-radius:999px;font-size:.62rem;font-weight:900;background:rgba(40,20,0,.85);border:1px solid #ff9800;color:#ffcc80;max-width:70%}
+.gate-pill{position:absolute;left:calc(var(--elevator-width) + 6px);top:36px;z-index:5;padding:3px 9px;border-radius:999px;font-size:.62rem;font-weight:900;background:rgba(40,20,0,.85);border:1px solid #ff9800;color:#ffcc80;max-width:calc(100% - var(--elevator-width) - 66px)}
 .tput-gate{margin-top:6px;font-size:.62rem;font-weight:800;color:#ffcc80}
 
 /* ---- trade chart: candles + range buttons ---- */

@@ -9,7 +9,9 @@
 
   S.TOTAL_FLOORS = 30;
   S.PAGE_SIZE = 48; S.MAX_PAGES = 5; S.PAGE_COST = [0, 300, 800, 2000, 5000]; // $AFKMINE price of backpack page n+1
-  S.ITEM_LVL_SPREAD = 10;
+  // Item level of a drop / crate item = Manager level +- ITEM_LVL_SPREAD, never below 1. u = uniform random in [0,1).
+  S.ITEM_LVL_SPREAD = 5;
+  S.itemLevelFor = (heroLvl, u) => Math.max(1, heroLvl - S.ITEM_LVL_SPREAD + Math.floor(u * (2 * S.ITEM_LVL_SPREAD + 1)));
   S.DROP_P0 = 0.0002;
   S.HERO_MAX = 100;                 // the "Manager" (internal name: hero)
   S.XP_PER_SEC = 0.2; // manager XP per second of play (before boosts / gear)
@@ -23,9 +25,18 @@
   S.UNLOCK_MINE = [40, 60, 80, 110, 150, 200, 260, 340, 440, 560,            // floors 11-20
                    450, 550, 650, 800, 950, 1100, 1300, 1500, 1750, 2000];   // floors 21-30
   S.UNLOCK_SHARDS = [2, 3, 4, 5, 6, 8, 10, 12, 15, 20];                       // floors 21-30
+  // ---- coin economy knobs [tunable] (scripts/economy-sim.js prints the resulting time-to-floor-N / levels curve) ----
+  // Floor n costs UNLOCK_BASE x UNLOCK_GROWTH^(n-1) coins. Floors 1..UNLOCK_STEEP_FROM-1 keep exactly that (fast start), from UNLOCK_STEEP_FROM on the price is
+  // additionally multiplied by UNLOCK_STEEP_JUMP x UNLOCK_STEEP_GROWTH^(n - UNLOCK_STEEP_FROM). This slows the mid / late game, not the first minutes
+  // (the early floors pay back so fast that a smooth ramp makes floors 4-8 fall in seconds, so the price steps up once at floor 4).
+  // Floor / elevator / warehouse level k costs base x LEVEL_GROWTH^k.
+  S.UNLOCK_BASE = 60; S.UNLOCK_GROWTH = 2.8;
+  S.UNLOCK_STEEP_FROM = 4; S.UNLOCK_STEEP_JUMP = 60; S.UNLOCK_STEEP_GROWTH = 1.18;
+  S.LEVEL_GROWTH = 1.15;
+  S.unlockSteep = (floor) => (floor < S.UNLOCK_STEEP_FROM ? 1 : S.UNLOCK_STEEP_JUMP * Math.pow(S.UNLOCK_STEEP_GROWTH, floor - S.UNLOCK_STEEP_FROM));
   // i = index (0-based) of the floor being unlocked. Floors you already owned before a Prestige only cost coins again.
   S.shaftUnlockCost = (i, mine) => {
-    const floor = i + 1, cash = Math.floor(60 * Math.pow(2.8, i));
+    const floor = i + 1, cash = Math.floor(S.UNLOCK_BASE * Math.pow(S.UNLOCK_GROWTH, i) * S.unlockSteep(floor));
     if (mine && i < (mine.maxUnlocked || 0)) return { cash, mine: 0, shards: 0 };
     return { cash, mine: floor > 10 ? S.UNLOCK_MINE[floor - 11] : 0, shards: floor > 20 ? S.UNLOCK_SHARDS[floor - 21] : 0 };
   };
@@ -60,7 +71,7 @@
   S.DAILY_BONUS = { crates: 1, bag: { boost_xp: 1 } };                 // finish all daily quests
   S.SEASON_QUESTS = [                                                  // last the whole 30-day season
     { id: "s_play", icon: "🕓", name: "Play for 10 hours", metric: "play", target: 36000, reward: { crates: 3 } },
-    { id: "s_lvls", icon: "📈", name: "Buy 1,500 upgrade levels", metric: "levels", target: 1500, reward: { cash: 480, cashMin: 50000, bag: { boost_earn: 1 } } },
+    { id: "s_lvls", icon: "📈", name: "Buy 1,000 upgrade levels", metric: "levels", target: 1000, reward: { cash: 480, cashMin: 50000, bag: { boost_earn: 1 } } },
     { id: "s_drops", icon: "✨", name: "Find 30 mining drops", desc: "Items and crates found by your miners.", metric: "drops", target: 30, reward: { crates: 4 } },
     { id: "s_item", icon: "🔨", name: "Try 60 item upgrades", metric: "itemUp", target: 60, reward: { cash: 120, cashMin: 20000, bag: { boost_power: 1 } } },
     { id: "s_floors", icon: "⛏️", name: "Unlock 20 floors", metric: "floors", state: true, target: 20, reward: { mine: 100 } },
@@ -161,7 +172,7 @@
   S.infraScale = (mine) => Math.pow(1.9, mine.unlockedShaftCount - 1);
   S.upgradeCost = (base, level, n, costMult) => {
     let total = 0;
-    for (let i = 0; i < n; i++) total += Math.floor(base * Math.pow(1.12, level + i) * costMult);
+    for (let i = 0; i < n; i++) total += Math.floor(base * Math.pow(S.LEVEL_GROWTH, level + i) * costMult);
     return total;
   };
   // Hero level N needs xpNeed(N) XP. All 99 levels together are ~129k XP = ~180 h of play at 0.2 XP/s, i.e. about 15 days at
@@ -178,6 +189,13 @@
   S.canEquip = (st, it) => it.il <= st.hero.lvl;
   S.invCap = (st) => st.invPages * S.PAGE_SIZE;
   S.spareItems = (st) => st.inv.filter((i) => st.eq[i.slot] !== i.id);
+  // what "Sell all" would do right now: every item that is neither locked nor equipped. Used by the server (authoritative) and by the confirmation dialog.
+  S.sellAllPreview = (st) => {
+    const items = S.spareItems(st).filter((i) => !i.lock);
+    let coins = 0, upgraded = 0;
+    for (const it of items) { coins += S.sellValue(it); if (it.up) upgraded++; }
+    return { items, count: items.length, coins, upgraded };
+  };
 
   S.computeFx = (st) => {
     const f = FX0();
@@ -207,7 +225,8 @@
   // is at least FLOOR_POWER_REQ(n). Total power = manager level * 50 + equipped usable gear (rarity, level, upgrades, affixes),
   // times the Power Boost while it runs (GATE_COUNTS_BOOST). [tunable] Floors 1..GATE_FREE_FLOORS are always on.
   S.GATE_FREE_FLOORS = 3; S.GATE_BASE = 120; S.GATE_GROWTH = 1.2; S.GATE_COUNTS_BOOST = true;
-  S.FLOOR_POWER_REQ = Array.from({ length: 30 }, (_, i) => (i + 1 <= S.GATE_FREE_FLOORS ? 0 : Math.round((S.GATE_BASE * Math.pow(S.GATE_GROWTH, i + 1 - S.GATE_FREE_FLOORS - 1)) / 10) * 10));
+  S.computeFloorReq = () => Array.from({ length: 30 }, (_, i) => (i + 1 <= S.GATE_FREE_FLOORS ? 0 : Math.round((S.GATE_BASE * Math.pow(S.GATE_GROWTH, i + 1 - S.GATE_FREE_FLOORS - 1)) / 10) * 10));
+  S.FLOOR_POWER_REQ = S.computeFloorReq();
   S.floorReq = (n) => S.FLOOR_POWER_REQ[Math.min(Math.max(n, 1), S.FLOOR_POWER_REQ.length) - 1];
   S.totalPower = (st, t) => Math.round(S.heroPower(st) * (S.GATE_COUNTS_BOOST ? S.powerMult(st, t) : 1));
   S.floorActive = (st, t) => { const pw = S.totalPower(st, t), n = st.mines.start.unlockedShaftCount, out = []; for (let i = 0; i < n; i++) out.push(pw >= S.floorReq(i + 1)); return out; };
@@ -360,6 +379,35 @@
     const v = Number(m[1]) * 10 ** decimals + Number((m[2] || "").padEnd(decimals, "0") || 0);
     return Number.isSafeInteger(v) ? v : null;
   };
+
+  // ---- $AFKMINE scale -------------------------------------------------------------------------------------------------
+  // Every number below that is PRICED or PAID in $AFKMINE (floor unlocks, backpack pages, item upgrades, the day-7 daily reward, seasonal quest rewards and the
+  // Earnings Boost quest thresholds) is written in the units of the ORIGINAL economy (season budget REF_BUDGET = 15M $AFKMINE) and multiplied by
+  // MINE_SCALE = server C.SEASON_BUDGET / REF_BUDGET. The server calls applyMineScale() at start (server/config.js), the browser calls it with
+  // the value the server sends (view.season.mineScale), so prices shown always match prices charged. Arrays/objects are changed IN PLACE.
+  S.REF_BUDGET = 15e6;
+  S.MINE_SCALE = 1;
+  const BASE = {
+    unlock: S.UNLOCK_MINE.slice(), page: S.PAGE_COST.slice(), up: S.UP_MINE.slice(), daily7: S.DAILY_REWARDS[6].mine,
+    sq: Object.fromEntries(S.SEASON_QUESTS.filter((q) => q.reward.mine).map((q) => [q.id, q.reward.mine])), hold: 50000, spend: 25000,
+  };
+  const scaled = (v, k) => Math.max(1, Math.round(v * k));
+  const grp = (n) => String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  S.applyMineScale = (k) => {
+    if (!(k > 0) || !isFinite(k)) return;
+    S.MINE_SCALE = k;
+    BASE.unlock.forEach((v, i) => (S.UNLOCK_MINE[i] = scaled(v, k)));
+    BASE.page.forEach((v, i) => (S.PAGE_COST[i] = v ? scaled(v, k) : 0));
+    BASE.up.forEach((v, i) => (S.UP_MINE[i] = v * k));                                   // fractions are fine, upgradeInfo() rounds the final price up
+    S.DAILY_REWARDS[6].mine = scaled(BASE.daily7, k);
+    for (const q of S.SEASON_QUESTS) if (BASE.sq[q.id]) q.reward.mine = scaled(BASE.sq[q.id], k);
+    const hold = S.QUESTS.find((q) => q.id === "hold"), spend = S.QUESTS.find((q) => q.id === "spend");
+    hold.target = scaled(BASE.hold, k); hold.name = "Hold " + grp(hold.target) + " $AFKMINE";
+    hold.desc = "Have at least " + grp(hold.target) + " $AFKMINE in your game balance. Dropping below it pauses the reward.";
+    spend.target = scaled(BASE.spend, k); spend.name = "Spend " + grp(spend.target) + " $AFKMINE";
+    spend.desc = "Spend " + grp(spend.target) + " $AFKMINE in total inside the game: packs, boosts, item upgrades, backpack pages.";
+  };
+  S.applyMineScale(1.5e6 / S.REF_BUDGET);                                                // default = the default season budget (server/config.js SEASON_BUDGET)
 
   return S;
 });

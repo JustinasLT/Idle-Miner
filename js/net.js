@@ -31,6 +31,7 @@ function applyView(j) {
   if (!j || j.cash == null) return;
   const firstOfAccount = net.accountId !== j.id, prevLvl = state.hero.lvl;
   net.accountId = j.id;
+  if (j.season && j.season.mineScale && j.season.mineScale !== Shared.MINE_SCALE) Shared.applyMineScale(j.season.mineScale);   // same $AFKMINE prices as the server
   net.info = j; net.online = true; net.error = "";
   net.offset = j.serverNow - Date.now();
   state.cash = j.cash; net.cashBase = j.cash; net.cashRate = j.cashPerSec; net.cashAt = performance.now();

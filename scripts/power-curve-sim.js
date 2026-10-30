@@ -7,10 +7,11 @@ const levelAt = (xp) => { let l = 1, need = 0; while (l < 99 && xp >= need + S.x
 const R = S.RARITIES;
 // typical equipped gear per stage: [pieces, rarity index, item level, avg upgrade]
 const STAGES = [
-  { h: 1, boost: 0, pieces: 2, r: 0, il: 2, up: 0, floors: 4 },
-  { h: 10, boost: 0.3, pieces: 5, r: 1, il: 12, up: 1, floors: 10 },
-  { h: 50, boost: 0.6, pieces: 8, r: 2, il: 35, up: 4, floors: 18 },
-  { h: 200, boost: 1.0, pieces: 8, r: 3, il: 70, up: 7, floors: 27 },
+  // floors = floors a player owns by then, from scripts/economy-sim.js (coin curve): ~14 at 1 h, ~22 at 10 h, ~27 at 50 h, all 30 by ~4 days
+  { h: 1, boost: 0, pieces: 2, r: 0, il: 2, up: 0, floors: 14 },
+  { h: 10, boost: 0.3, pieces: 5, r: 1, il: 12, up: 1, floors: 22 },
+  { h: 50, boost: 0.6, pieces: 8, r: 2, il: 35, up: 4, floors: 27 },
+  { h: 200, boost: 1.0, pieces: 8, r: 3, il: 70, up: 7, floors: 30 },
 ];
 const piece = (s) => { const f = 1 + 0.03 * (s.il - 1), base = 0.035 * R[s.r].m * f, aff = R[s.r].aff * 0.05 * Math.sqrt(R[s.r].m) * f; return Math.round((base + aff) * (1 + S.UP_BONUS * s.up) * 1000); };
 // requirement curve candidate: floors 1-3 free, then geometric

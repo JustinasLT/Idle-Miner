@@ -223,7 +223,7 @@ function createGame({ store, now: nowFn, rng: rngOpt }) {
     if (r >= 4) h.pL = 0;
     return r;
   }
-  const rollItemLevel = (p) => Math.max(1, p.hero.lvl + Math.floor(rnd(-S.ITEM_LVL_SPREAD, S.ITEM_LVL_SPREAD + 1)));
+  const rollItemLevel = (p) => S.itemLevelFor(p.hero.lvl, rng());
   function genItem(p, lvl, slot, r, depth) {
     slot = slot || S.SLOTS[Math.floor(rng() * 8)];
     if (r == null) r = rollRarity(p, depth || 1);
@@ -401,11 +401,19 @@ function createGame({ store, now: nowFn, rng: rngOpt }) {
 
   // ---- leaderboard ---------------------------------------------------------------------------------------
   const pointsOf = (p) => Math.floor(p.power + p.hero.lvl * 20 + p.items * 5 + p.earned * 0.1);
-  let prizeW = null;
+  // Prize pool = min(budget x PRIZE_SHARE, PRIZE_CIRC_CAP_PCT x circulating $AFKMINE). While the season runs it follows the live circulating supply;
+  // at the first look after the season ended it is frozen in db.season.prizePool so every claim pays from the same pool.
+  const prizePoolNow = () => Math.min(C.LB_POOL, C.PRIZE_CIRC_CAP_PCT > 0 ? C.PRIZE_CIRC_CAP_PCT * circulating() : Infinity);
+  function prizePool() {
+    if (!over()) return prizePoolNow();
+    if (db.season.prizePool == null) { db.season.prizePool = prizePoolNow(); touchMeta(); }
+    return db.season.prizePool;
+  }
   function prizeFor(rank) {
     if (rank < 1 || rank > C.LB_SIZE) return 0;
-    if (!prizeW) { prizeW = Array.from({ length: C.LB_SIZE }, (_, i) => 1 / Math.pow(i + 1, C.LB_PRIZE_EXP)); prizeW.sum = prizeW.reduce((a, b) => a + b, 0); }
-    return (C.LB_POOL * prizeW[rank - 1]) / prizeW.sum;
+    let from = 0;
+    for (const t of C.LB_TIERS) { if (rank <= t.to) return (prizePool() * t.share) / (t.to - from); from = t.to; }
+    return 0;
   }
   function board() {
     if (boardCache.v && Date.now() - boardCache.t < 3000) return boardCache.v;
@@ -422,7 +430,8 @@ function createGame({ store, now: nowFn, rng: rngOpt }) {
     return v;
   }
   const row = (r, i) => ({ rank: i + 1, name: r.p.name, level: r.p.hero.lvl, power: Math.round(r.p.power), items: r.p.items, earned: r.p.earned, prize: prizeFor(i + 1), pts: r.pts, pack: isPaid(r.p), tags: tagsOf(r.p) });
-  const seasonInfo = () => ({ start: db.season.start, end: seasonEnd(), now: now(), over: over(), days: C.SEASON_DAYS });
+  const seasonInfo = () => ({ start: db.season.start, end: seasonEnd(), now: now(), over: over(), days: C.SEASON_DAYS,
+    budget: C.SEASON_BUDGET, prizePool: prizePool(), prizeMax: C.LB_POOL, miningPool: C.MINING_POOL, tiers: C.LB_TIERS, circCapPct: C.PRIZE_CIRC_CAP_PCT, mineScale: C.MINE_SCALE });
   function leaderboard(p) {
     const b = board();
     return { season: seasonInfo(), players: b.players, global: b.global, minedAll: b.minedAll, total: b.ranked.length,
@@ -1026,12 +1035,15 @@ function createGame({ store, now: nowFn, rng: rngOpt }) {
       if (p.eq[it.slot] === it.id) bad("Unequip it first");
       p.cash += S.sellValue(it); p.inv = p.inv.filter((i) => i !== it);
     },
+    // Sells EVERYTHING that is not locked and not equipped (any rarity, upgraded or not). The server recomputes the list and the
+    // payout itself; the client only shows a preview (S.sellAllPreview) in its confirmation. Takes no parameters from the client.
     sellAll(p) {
-      const list = S.spareItems(p).filter((i) => !i.lock && !i.up && i.r <= 2);
-      if (!list.length) bad("Nothing to sell — Epic+, upgraded and locked items are kept");
-      for (const it of list) p.cash += S.sellValue(it);
-      const gone = new Set(list);
+      const pv = S.sellAllPreview(p);
+      if (!pv.items.length) bad("Nothing to sell — locked and equipped items are kept");
+      p.cash += pv.coins;
+      const gone = new Set(pv.items);
       p.inv = p.inv.filter((i) => !gone.has(i));
+      return { sold: { count: pv.count, upgraded: pv.upgraded, coins: pv.coins } };
     },
     sort(p) { p.inv.sort((x, y) => y.r - x.r || y.il - x.il || x.id - y.id); },
     autoEquip(p) { autoEquip(p); },

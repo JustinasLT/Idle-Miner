@@ -1,5 +1,5 @@
 "use strict";
-const bnText = $("bn-text"), elCable = $("elevator-cable"), hfWheel = $("hf-wheel");
+const bnText = $("bn-text"), elCable = $("elevator-cable"), hfWheel = $("hf-wheel"), elOp = $("elevator-op");
 let slowN = 0;
 const bnDismissed = { kind: null, until: 0 };
 const BOOST_LABEL = { xp: "📖 XP +100%", earn: "💰 Earnings +50%", power: "⚡ Power +100%" };
@@ -23,9 +23,6 @@ function renderHUD() {
   }).join("");
   const bc = $("boost-chips");
   if (bc._h !== chips) { bc.innerHTML = chips; bc._h = chips; }
-  const sh = (state.bag && state.bag.shards) || 0;
-  $("shard-chip").hidden = sh < 1 && !(state.pending && state.pending.shards);
-  setText($("shard-count"), String(sh));
   updateUpgradeCosts();
 }
 function updateUpgradeCosts() {
@@ -41,6 +38,7 @@ function renderGameVisuals(mine) {
   elCable.style.top = WHEEL_Y + "px";
   elCable.style.height = Math.max(0, top - WHEEL_Y) + "px";
   hfWheel.classList.toggle("spin", e.state === "move");
+  elOp.classList.toggle("walking", e.state === "move");
   elLoad.style.height = Math.min(100, (e.u / elevatorCapacity(mine.elevator.level)) * 100) + "%";
   setText(pileVal, formatMoney(mine.pile.v));
   for (let i = 0; i < mine.unlockedShaftCount; i++) {
@@ -74,6 +72,7 @@ function refreshFloors(mine) {
     const c = nextFloorCost(mine), b = floorUI.unlockBtn, no = [state.cash < c.cash, c.mine && state.token < c.mine, c.shards && (state.bag.shards || 0) < c.shards];
     b.classList.toggle("poor", no.some(Boolean));
     ["ca", "mi", "sh"].forEach((k, n) => { const el = b.querySelector("." + k); if (el) el.classList.toggle("bad", !!no[n]); });
+    if (c.shards) setText(b.querySelector(".sh"), "💠 have " + ((state.bag && state.bag.shards) || 0) + " / need " + c.shards);   // live: shards found while you look at the button
   }
 }
 // throughput bars (cash/min) make the bottleneck visible at a glance

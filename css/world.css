@@ -39,8 +39,12 @@
 .wh-win{position:absolute;top:16px;left:8px;width:14px;height:12px;background:#ffe082;border:2px solid #4e342e;box-shadow:0 0 8px rgba(255,224,130,.7)}.wh-win.w2{left:auto;right:8px}
 .wh-door{position:absolute;left:50%;bottom:0;width:22px;height:25px;transform:translateX(-50%);background:linear-gradient(90deg,#3e2723 48%,#2a1a14 48% 52%,#3e2723 52%);border-radius:3px 3px 0 0}
 .wh-sacks{position:absolute;left:-22px;bottom:0;width:18px;height:14px;border-radius:7px 7px 2px 2px;background:#d7c08a;border:1px solid #8d6e3f;box-shadow:10px 3px 0 -1px #c9ae72}
-.wh-panel{position:absolute;left:calc(var(--elevator-width) + 8px);top:8px;z-index:5;display:flex;align-items:center;gap:8px;background:rgba(20,12,6,.6);border-radius:12px;padding:5px 8px}
-.lvl-badge,.el-lvl-badge{font-size:.62rem;font-weight:900;background:rgba(0,0,0,.55);padding:2px 8px;border-radius:999px;border:1px solid rgba(255,152,0,.3)}
+/* upgrade buttons of the two shared buildings sit ABOVE them (the elevator on top of its headframe, the warehouse over its roof), like a floor's button sits on its floor */
+.upgrade-panel{position:absolute;z-index:5;display:flex;flex-direction:column;align-items:center;gap:3px}
+.upgrade-panel .btn-upgrade.big{width:100%;padding:5px 4px}
+.wh-panel{right:6px;width:90px;bottom:calc(var(--grass-h) + 84px)}   /* 84 = building 54 + roof / chimney 26 + 4 gap */
+.el-panel{left:0;width:var(--elevator-width);padding:0 4px;box-sizing:border-box;top:12px}
+.lvl-badge,.el-lvl-badge{white-space:nowrap;font-size:.58rem;font-weight:900;background:rgba(0,0,0,.55);padding:2px 8px;border-radius:999px;border:1px solid rgba(255,152,0,.3)}
 /* ---------- UNDERGROUND ---------- */
 .underground{position:absolute;left:0;right:0;top:var(--surface-h);bottom:0;background:
  radial-gradient(circle at 20% 30%,rgba(255,255,255,.06) 0 2px,transparent 3px) 0 0/46px 46px,
@@ -51,12 +55,12 @@
 .elevator-shaft{position:absolute;left:0;top:var(--surface-h);bottom:0;width:var(--elevator-width);display:flex;flex-direction:column;justify-content:flex-end;pointer-events:none}
 .shaft-core{position:absolute;left:10px;right:10px;top:0;height:0;z-index:1;background:linear-gradient(90deg,#150d08,#24160d 50%,#150d08);box-shadow:inset 0 0 0 2px #0d0805,inset 0 0 0 5px #3e2a1a;transition:height .4s}
 .shaft-core::after{content:"";position:absolute;inset:0;background-size:100% var(--floor-h);background-image:linear-gradient(to bottom,transparent calc(var(--head-h) + var(--tunnel-h)),#8d6e63 calc(var(--head-h) + var(--tunnel-h)),#8d6e63 calc(var(--head-h) + var(--tunnel-h) + 4px),transparent calc(var(--head-h) + var(--tunnel-h) + 4px))}
-.elevator-ui{position:sticky;bottom:8px;z-index:6;pointer-events:auto;display:flex;flex-direction:column;align-items:center;gap:5px;padding:0 6px}
-.elevator-ui .btn-upgrade{width:100%;padding:6px 4px}
 .elevator-cable{position:absolute;left:calc(var(--elevator-width)/2 - 1px);width:2px;z-index:3;background:linear-gradient(90deg,#222,#777,#222)}
 .elevator-car{position:absolute;left:calc((var(--elevator-width) - 44px)/2);top:0;width:44px;height:44px;z-index:4;background:linear-gradient(#ef5350,#c62828);border:2px solid #ffab91;border-radius:6px;box-shadow:0 4px 8px rgba(0,0,0,.5),inset 0 -6px 0 rgba(0,0,0,.18);display:grid;place-items:center}
 .elevator-car::before{content:"";position:absolute;left:50%;top:-6px;width:12px;height:6px;margin-left:-6px;background:#546e7a;border-radius:3px 3px 0 0}
-.elevator-icon-wrap{font-size:1rem;position:relative}
+/* the operator is the same 👷 sprite the miners use; it is a child of the cab, so it moves with it for free and only bobs (CSS transform) while the cab drives */
+.actor.elevator-op{left:50%;bottom:5px;margin-left:-14px;z-index:1;text-align:center}
+.actor.elevator-op::after{display:none}
 .elevator-load{position:absolute;left:3px;right:3px;bottom:3px;height:0;max-height:70%;background:linear-gradient(var(--ore-glow),#f57c00);border-radius:2px;box-shadow:0 0 8px rgba(255,213,79,.7)}
 .super-active{box-shadow:0 0 24px #e040fb,0 0 48px rgba(224,64,251,.3)!important}
 /* ---------- FLOORS ---------- */

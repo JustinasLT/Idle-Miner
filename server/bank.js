@@ -38,7 +38,7 @@ function createBank(game, chain) {
       cluster: SOL.cluster, treasury: chain.treasury || "", enabled: !!chain.enabled, mineDiscount: SOL.mineDiscount,
       minDeposit: SOL.minDepositLamports, maxDeposit: SOL.maxDepositLamports, minWithdraw: SOL.minWithdrawLamports, maxWithdraw: SOL.maxWithdrawLamports,
       withdrawFee: SOL.withdrawFeeBps / 10000, withdrawCooldownMs: SOL.withdrawCooldownMs,
-      freeCap: C.FREE_EARN_CAP, devFaucet: C.DEV_FAUCET, devMine: C.DEV_MINE_AMOUNT, prices: PRICES, tradeFeeBps: C.TRADE_FEE_BPS,
+      mineScale: C.MINE_SCALE, freeCap: C.FREE_EARN_CAP, devFaucet: C.DEV_FAUCET, devMine: C.DEV_MINE_AMOUNT, prices: PRICES, tradeFeeBps: C.TRADE_FEE_BPS,
       packs: PACKS.map((p) => ({ id: p.id, name: p.name, mine: game.packMinePrice(p), lamports: p.lamports, sol: p.lamports / 1e9, blurb: p.blurb, cash: p.cash, xp: p.xp, crates: p.crates, gear: p.gearRarity, pieces: p.slots.length, slots: p.slots })),
     };
   }

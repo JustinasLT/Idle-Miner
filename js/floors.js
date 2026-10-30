@@ -32,7 +32,7 @@ let shaftsBuilt = false;
     row.className = "floor locked";
     row.style.setProperty("--ore", def.color);
     const c = Shared.shaftUnlockCost(i, activeMine());
-    row.innerHTML = `<button type="button" class="btn-unlock-shaft">🔒 Unlock floor ${i + 1} · ${def.name}<br><small class="uc"><span class="ca">${formatMoney(c.cash)}</span>${c.mine ? `<span class="mi">◈ ${nf(c.mine)}</span>` : ""}${c.shards ? `<span class="sh">💠 ${c.shards}</span>` : ""}</small></button>`;
+    row.innerHTML = `<button type="button" class="btn-unlock-shaft">🔒 Unlock floor ${i + 1} · ${def.name}<br><small class="uc"><span class="ca">${formatMoney(c.cash)}</span>${c.mine ? `<span class="mi">◈ ${nf(c.mine)}</span>` : ""}${c.shards ? `<span class="sh">💠 have ${state.bag.shards || 0} / need ${c.shards}</span>` : ""}</small></button>`;
     const b = row.querySelector("button");
     b.addEventListener("click", () => buyShaftUnlock(i));
     floorUI.unlockBtn = b;
