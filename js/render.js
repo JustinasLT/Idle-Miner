@@ -55,7 +55,7 @@ function renderGameVisuals(mine) {
 }
 // slow refresh (4x/sec): labels, costs, miner counts
 function refreshFloors(mine) {
-  GATE = S.gateInfo(state, Date.now());                             // which floors reach their Power requirement
+  GATE = Shared.gateInfo(state, Date.now());                             // which floors reach their Power requirement
   renderGate();
   for (let i = 0; i < mine.unlockedShaftCount; i++) {
     const f = floorUI[i], sh = mine.shafts[i];
@@ -65,7 +65,7 @@ function refreshFloors(mine) {
     const on = !GATE || GATE.active[i] !== false;
     f.row.classList.toggle("gated", !on);
     setText(f.inc, on ? formatMoney(floorUnitRate(i, mine) * unitValue(i, mine) * 60) + "/min" : "💤 idle");
-    setText(f.need, on ? "" : "Needs " + fmtN(S.floorReq(i + 1)) + " Power, you have " + fmtN(GATE.power));
+    setText(f.need, on ? "" : "Needs " + fmtN(Shared.floorReq(i + 1)) + " Power, you have " + fmtN(GATE.power));
     const c1 = upgradeCost(18 * Math.pow(2.3, i), sh.level, 1, costMult());
     setText(f.cost, formatMoney(c1));
     f.btn.classList.toggle("poor", state.cash < c1);
