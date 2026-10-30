@@ -22,22 +22,22 @@ async function renderRanks() {
   const tr = (r, me) => `<tr class="${me ? "me" : ""}"><td class="rk">${medal(r.rank)}</td><td class="nmc">${me ? "⭐ " : ""}${esc(r.name)}</td><td>${r.level}</td><td>${fmtN(r.power)}</td><td>${r.items}</td><td class="tokc">${formatToken(r.earned)}</td><td class="tokc">${r.prize ? formatToken(r.prize) : "–"}</td><td class="pts">${fmtN(r.pts)}</td></tr>`;
   const myName = info ? info.name : "";
   const inTop = D.me && D.me.rank <= LB_SIZE;
-  const claim = over && info && !claimed ? `<button type="button" class="btn-primary claim" data-r="claim">🏆 Claim ${mine.prize ? formatToken(mine.prize) + " $MINE" : "(no prize this season)"}</button>` : over ? `<p class="dim small">Prize claimed ✓</p>` : "";
+  const claim = over && info && !claimed ? `<button type="button" class="btn-primary claim" data-r="claim">🏆 Claim ${mine.prize ? formatToken(mine.prize) + " $AFKMINE" : "(no prize this season)"}</button>` : over ? `<p class="dim small">Prize claimed ✓</p>` : "";
   const dayNo = Math.min(SEASON_DAYS, Math.floor((D.season.now - D.season.start) / 864e5) + 1);
   $("ranks-content").innerHTML = rankTabs() + `
-    <div class="season-hero"><small>SEASON 0 PRIZE POOL</small><b class="prize-big">◈ ${formatToken(LB_POOL + MINING_POOL)} $MINE</b>
+    <div class="season-hero"><small>SEASON 0 PRIZE POOL</small><b class="prize-big">◈ ${formatToken(LB_POOL + MINING_POOL)} $AFKMINE</b>
       <div class="season-split"><span>🏆 ${formatToken(LB_POOL)} top ${LB_SIZE} prizes</span><span>⛏️ ${formatToken(MINING_POOL)} mining</span></div>
       <div class="season-timer"><small>${over ? "SEASON ENDED" : "TIME REMAINING"}</small><b id="season-left">${fmtLeft(seasonLeftMs())}</b></div>
       <i class="dur"><u style="width:${Math.min(100, ((D.season.now - D.season.start) / SEASON_MS) * 100)}%"></u></i>
-      <small class="dim">Day ${dayNo} of ${SEASON_DAYS} · ${D.players} active players · ${formatToken(D.minedAll)} / ${formatToken(MINING_POOL)} mined · part of ${formatToken(TOTAL_POOL)} total $MINE</small></div>
+      <small class="dim">Day ${dayNo} of ${SEASON_DAYS} · ${D.players} active players · ${formatToken(D.minedAll)} / ${formatToken(MINING_POOL)} mined · part of ${formatToken(TOTAL_POOL)} total $AFKMINE</small></div>
     <div class="rank-me"><div><small>YOUR RANK</small><b>${mine.rank ? "#" + mine.rank : "–"}</b></div><div><small>POINTS</small><b>${fmtN(mine.pts)}</b></div><div><small>${over ? "PRIZE" : "PROJECTED PRIZE"}</small><b class="tokc">${mine.prize ? formatToken(mine.prize) : "–"}</b></div>
       <div><small>STAKE</small><b>${m.share * 100 < 0.01 ? "<0.01" : (m.share * 100).toFixed(2)}%</b></div></div>
     ${claim}
     <div class="rank-name"><span class="dim">Username:</span> <b>${esc(myName)}</b> <button type="button" class="inv-btn" data-r="rename">✎ Rename</button></div>
-    <div class="rank-wrap"><table class="rank-t"><thead><tr><th>#</th><th>Player</th><th>Lvl</th><th>Power</th><th>Items</th><th>$Mine</th><th>Prize</th><th>Pts</th></tr></thead><tbody>
+    <div class="rank-wrap"><table class="rank-t"><thead><tr><th>#</th><th>Player</th><th>Lvl</th><th>Power</th><th>Items</th><th>$AFKMINE</th><th>Prize</th><th>Pts</th></tr></thead><tbody>
       ${D.rows.map((r) => tr(r, D.me && r.rank === D.me.rank && r.name === myName)).join("")}${D.me && !inTop ? `<tr class="gap"><td colspan="8">⋯</td></tr>${tr(D.me, true)}` : ""}
     </tbody></table></div>
-    <p class="dim small rank-note">Points = Power + Level×20 + Items×5 + $Mine earned×0.1. Prizes shown are projected from the current rank and can be claimed when the season ends.</p>`;
+    <p class="dim small rank-note">Points = Power + Level×20 + Items×5 + $AFKMINE earned×0.1. Prizes shown are projected from the current rank and can be claimed when the season ends.</p>`;
 }
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 function renameUser() {
@@ -61,23 +61,23 @@ async function renderRefTab() {
   if (!ranksOpen() || RANKS.tab !== "ref") return;
   refLinkText = location.origin + "/?ref=" + mine.code;
   const rate = Math.round(mine.rate * 100), myName = state.name;
-  const row = (r, me) => `<tr class="${me ? "me" : ""}"><td class="rk">${r.rank === 1 ? "🥇" : r.rank === 2 ? "🥈" : r.rank === 3 ? "🥉" : r.rank || "–"}</td><td class="nmc">${me ? "⭐ " : ""}${esc(r.name)}</td><td>${nf(r.referred)}</td><td class="tokc">${formatToken(r.earned)}</td></tr>`;
+  const row = (r, me) => `<tr class="${me ? "me" : ""}"><td class="rk">${r.rank === 1 ? "🥇" : r.rank === 2 ? "🥈" : r.rank === 3 ? "🥉" : r.rank || "–"}</td><td class="nmc">${me ? "⭐ " : ""}${esc(r.name)}</td><td>${nf(r.referred)}</td><td class="tokc">${r.earnedSol ? "◎ " + fmtLam(r.earnedSol) + (r.earned ? " + " : "") : ""}${r.earned || !r.earnedSol ? "◈ " + formatToken(r.earned) : ""}</td></tr>`;
   const inTop = lb.me && lb.me.rank > 0 && lb.me.rank <= lb.rows.length;
-  const people = mine.list.length ? mine.list.map((p) => `<div class="st-row"><span>${esc(p.name)}</span><b>${p.pack ? "📦 pack bought" : "<span class='dim'>no pack yet</span>"} <span class="tokc">◈ ${formatToken(p.paid)}</span></b></div>`).join("")
+  const people = mine.list.length ? mine.list.map((p) => `<div class="st-row"><span>${esc(p.name)}</span><b>${p.pack ? "📦 pack bought" : "<span class='dim'>no pack yet</span>"} <span class="tokc">${p.paidSol ? "◎ " + fmtLam(p.paidSol) + (p.paid ? " + " : "") : ""}${p.paid || !p.paidSol ? "◈ " + formatToken(p.paid) : ""}</span></b></div>`).join("")
     : `<p class="dim">Nobody yet — share your link!</p>`;
   el.innerHTML = rankTabs() + `<div class="ref-pad">
     <div class="inv-card"><h3>🤝 Invite friends</h3>
-      <p class="dim">Share your personal link. Whenever someone who joined through it spends on a pack, <b>you get ${rate}%</b> of that amount as $MINE in your balance.</p>
+      <p class="dim">Share your personal link. Whenever someone who joined through it spends on a pack, <b>you get ${rate}%</b> of that amount: as SOL in your balance when they pay a pack with SOL they deposited, or as $AFKMINE when they pay with $AFKMINE. It is paid out of what they spent — nothing is created.</p>
       <div class="ref-link"><input id="ref-link" class="name-in" readonly value="${esc(refLinkText)}" /><button type="button" class="inv-btn gold" data-r="copyref">Copy</button>${navigator.share ? `<button type="button" class="inv-btn" data-r="shareref">Share</button>` : ""}</div>
-      <div class="ref-stats"><div><b>${nf(mine.count)}</b><small>referred</small></div><div><b class="tokc">◈ ${formatToken(mine.earned)}</b><small>earned</small></div><div><b>${rate}%</b><small>of pack spending</small></div></div>
+      <div class="ref-stats"><div><b>${nf(mine.count)}</b><small>referred</small></div><div><b class="tokc">${mine.earnedSol ? "◎ " + fmtLam(mine.earnedSol) + "<br>" : ""}◈ ${formatToken(mine.earned)}</b><small>earned</small></div><div><b>${rate}%</b><small>of pack spending</small></div></div>
       <p class="dim small">Code: <b class="mono">${esc(mine.code)}</b>${state.ref && state.ref.by ? " · you joined through <b>" + esc(state.ref.by) + "</b>" : ""}</p></div>
     <div class="inv-card ref-list"><h3>Your referred players</h3>${people}</div>
     <h3 style="margin:12px 0 6px">🏆 Referral leaderboard</h3>
-    <div class="rank-wrap"><table class="rank-t"><thead><tr><th>#</th><th>User</th><th>Referred</th><th>$Mine earned</th></tr></thead><tbody>
+    <div class="rank-wrap"><table class="rank-t"><thead><tr><th>#</th><th>User</th><th>Referred</th><th>Earned</th></tr></thead><tbody>
       ${lb.rows.length ? lb.rows.map((r) => row(r, r.name === myName && lb.me && r.rank === lb.me.rank)).join("") : `<tr><td colspan="4" class="dim">No referrals yet — be the first!</td></tr>`}
       ${lb.me && !inTop ? `<tr class="gap"><td colspan="4">⋯</td></tr>${row(lb.me, true)}` : ""}
     </tbody></table></div>
-    <p class="dim small rank-note">Ranked by $MINE earned from referrals, then by number of referred players.</p></div>`;
+    <p class="dim small rank-note">Ranked by the value earned from referrals (SOL plus $AFKMINE at the current price), then by number of referred players.</p></div>`;
 }
 async function copyRefLink() {
   try { await navigator.clipboard.writeText(refLinkText); toast("Link copied 📋"); }
@@ -95,7 +95,7 @@ function setupRanks() {
     if (b.dataset.r === "rename") renameUser();
     else if (b.dataset.r === "retry") { await netSync(); renderRanks(); }
     else if (b.dataset.r === "claim") {
-      try { const r = await netClaim(); if (!r.ok) toast(r.error); else toast(r.paid ? "🏆 Prize claimed: " + formatToken(r.paid) + " $MINE!" : "Season 0 is over — thanks for playing!"); } catch (er) { toast(er.message); }
+      try { const r = await netClaim(); if (!r.ok) toast(r.error); else toast(r.paid ? "🏆 Prize claimed: " + formatToken(r.paid) + " $AFKMINE!" : "Season 0 is over — thanks for playing!"); } catch (er) { toast(er.message); }
       renderHUD(); renderRanks();
     }
   });

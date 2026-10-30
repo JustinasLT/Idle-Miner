@@ -1,7 +1,7 @@
 "use strict";
-// "Welcome back": what your miners earned while you were away, all tallied by the server — coins, $MINE, items, crates and
+// "Welcome back": what your miners earned while you were away, all tallied by the server — coins, $AFKMINE, items, crates and
 // Mine Shards. Without the Offline Earnings perk (all five boost quests) you only earn for the first 15 minutes after closing the
-// game; with it, up to 8 hours (cash and loot at 50%). Here we only show it. Coins are paid when you press Collect; the $MINE is
+// game; with it, up to 8 hours (cash and loot at 50%). Here we only show it. Coins are paid when you press Collect; the $AFKMINE is
 // already in your balance; items, crates and shards wait in "Claim mining rewards".
 let offlineShown = false;
 function maybeOfflineModal() {
@@ -14,7 +14,7 @@ function maybeOfflineModal() {
   if (a.items) loot.push(`✨ ${a.items} item${a.items === 1 ? "" : "s"}`);
   if (a.crates) loot.push(`📦 ${a.crates} crate${a.crates === 1 ? "" : "s"}`);
   const rows = [];
-  if (a.mine > 0.005) rows.push(`<div><span>◈ $MINE mined</span><b class="tk">+${formatToken(a.mine)}</b></div>`);
+  if (a.mine > 0.005) rows.push(`<div><span>◈ $AFKMINE mined</span><b class="tk">+${formatToken(a.mine)}</b></div>`);
   if (loot.length) rows.push(`<div><span>Loot found</span><b>${loot.join(" · ")}</b></div>`);
   if (a.shards) rows.push(`<div><span>💠 Mine Shards</span><b class="sh">+${a.shards}</b></div>`);
   $("offline-list").innerHTML = rows.join("");

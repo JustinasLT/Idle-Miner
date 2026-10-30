@@ -45,7 +45,7 @@ let shaftsBuilt = false;
     if (floorIndex !== mine.unlockedShaftCount) return;
     const c = Shared.shaftUnlockCost(floorIndex, mine);
     if (state.cash < c.cash) return toast("Not enough cash");
-    if (c.mine && state.token < c.mine) return toast("Not enough $MINE (" + nf(c.mine) + " needed)");
+    if (c.mine && state.token < c.mine) return toast("Not enough $AFKMINE (" + nf(c.mine) + " needed)");
     if (c.shards && (state.bag.shards || 0) < c.shards) return toast("Not enough Mine Shards (" + c.shards + " needed) — miners find them from floor " + Shared.SHARD_FROM + " down");
     const j = await netAct({ type: "unlockFloor" });
     if (!j.ok) return toast(j.error);

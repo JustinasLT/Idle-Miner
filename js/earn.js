@@ -31,13 +31,13 @@ function openClaim() {
     <p class="small">Found since your last claim · ${p.since ? fmtAgo(serverNow() - p.since) : "—"}</p>
     <div class="claim-stats">
       <div><b>${p.n}</b><small>items</small></div><div><b>${p.crates}</b><small>crates</small></div><div><b class="shc">💠 ${p.shards || 0}</b><small>shards</small></div>
-      <div><b>${formatMoney(p.cash)}</b><small>cash mined</small></div><div><b class="tokc">◈ ${formatToken(p.mine)}</b><small>$MINE mined</small></div>
+      <div><b>${formatMoney(p.cash)}</b><small>cash mined</small></div><div><b class="tokc">◈ ${formatToken(p.mine)}</b><small>$AFKMINE mined</small></div>
     </div>
     ${empty ? `<p class="dim">Nothing found yet. Items and crates drop while your miners work — deeper floors give better rarities, and from floor ${Shared.SHARD_FROM} down they can also find very rare Mine Shards.</p>`
       : `<div class="claim-chips">${counts.map(([R, c]) => `<span style="--rc:${R.c}">${c}× ${R.n}</span>`).join("")}${p.crates ? `<span style="--rc:#ffb74d">${p.crates}× Crate</span>` : ""}${p.shards ? `<span style="--rc:#4dd0e1">${p.shards}× Mine Shard</span>` : ""}</div>
          <div class="claim-grid">${tiles}${items.length > shown.length ? `<span class="claim-more">+${items.length - shown.length} more</span>` : ""}</div>`}
     ${p.n && spare + p.n > cap ? `<p class="warn">🎒 Backpack ${spare}/${cap}: only ${Math.max(0, cap - spare)} item(s) fit — the rest stay here until you make room (sell items or unlock a page).</p>` : ""}
-    <p class="dim small">Cash and $MINE are already in your balance — this is the loot you still have to pick up. Up to ${p.max} items are kept; more are auto-sold.</p>
+    <p class="dim small">Cash and $AFKMINE are already in your balance — this is the loot you still have to pick up. Up to ${p.max} items are kept; more are auto-sold.</p>
     <div class="modal-actions"><button type="button" class="btn-primary" id="claim-go" ${empty ? "disabled" : ""}>Claim all</button><button type="button" class="btn-secondary" id="claim-no">Close</button></div>`, "wide");
   $("claim-no").onclick = closeModal;
   $("claim-go").onclick = doClaim;
@@ -55,13 +55,13 @@ async function doClaim() {
 
 // ---------------------------------------------------------------- Earnings Boost menu
 const EARN = { open: false, stats: null, at: 0, timer: 0, poll: 0, linking: null };
-const QUEST_BAR = { hold: (v) => nf(v) + " / 50,000 $MINE", deposit: (v) => nf(v) + " / 50,000 $MINE", spend: (v) => nf(v) + " / 25,000 $MINE", streak: (v) => fmtDur(v) + " / 24h 00m", social: (v) => v + " / 2 linked" };
+const QUEST_BAR = { hold: (v) => nf(v) + " / 50,000 $AFKMINE", deposit: (v) => fmtLam(v) + " / 0.5 SOL", spend: (v) => nf(v) + " / 25,000 $AFKMINE", streak: (v) => fmtDur(v) + " / 24h 00m", social: (v) => v + " / 2 linked" };
 
 function openEarn() {
   EARN.open = true; EARN.linking = null; EARN.stats = null;
   openModal(`<h2>🚀 Earnings Boost</h2>
     <div class="pool-card">
-      <small>LIVE REWARD POOL</small><b id="ep-pool" class="tokc">◈ …</b><small id="ep-pool-sub">$MINE left to be mined this season</small>
+      <small>LIVE REWARD POOL</small><b id="ep-pool" class="tokc">◈ …</b><small id="ep-pool-sub">$AFKMINE left to be mined this season</small>
       <div class="pool-grid">
         <div><small>All players earn / day</small><b id="ep-daily" class="tokc">◈ …</b></div>
         <div><small>Total players</small><b id="ep-players">…</b></div>
@@ -70,7 +70,7 @@ function openEarn() {
       <small class="dim" id="ep-note"></small>
     </div>
     <div id="earn-sum"></div><div id="earn-quests"></div>
-    <p class="dim small">Every finished quest adds <b>+10%</b> to your earnings (cash and your share of the $MINE pool), up to <b>+50%</b>. Finish <b>all five</b> to unlock <b>Offline Earnings</b>. Without them you stop earning cash and $MINE <b>${state.offline.freeMin} minutes</b> after closing the game tab.</p>
+    <p class="dim small">Every finished quest adds <b>+10%</b> to your earnings (cash and your share of the $AFKMINE pool), up to <b>+50%</b>. Finish <b>all five</b> to unlock <b>Offline Earnings</b>. Without them you stop earning cash and $AFKMINE <b>${state.offline.freeMin} minutes</b> after closing the game tab.</p>
     <div class="modal-actions"><button type="button" class="btn-secondary" id="earn-close">Close</button></div>`, "wide earn-modal");
   $("earn-close").onclick = closeModal;
   $("earn-quests").onclick = earnClick;
@@ -86,7 +86,7 @@ async function loadStats() {
   setText($("ep-daily"), "◈ " + formatToken(s.daily));
   setText($("ep-players"), nf(s.players));
   setText($("ep-online"), nf(s.online));
-  setText($("ep-pool-sub"), "of " + nf(s.poolTotal) + " $MINE left to be mined" + (s.over ? " — season over" : ""));
+  setText($("ep-pool-sub"), "of " + nf(s.poolTotal) + " $AFKMINE left to be mined" + (s.over ? " — season over" : ""));
   setText($("ep-note"), s.active < FULL_PLAYERS ? "Only " + s.active + " active miners — the daily emission scales up until " + FULL_PLAYERS + " play." : "Full daily emission is active (" + nf(s.active) + " active miners).");
   earnTick();
 }
@@ -125,7 +125,7 @@ function fillEarn() {
         <i class="dur"><u style="width:${Math.min(100, (q.value / d.target) * 100)}%"></u></i><span class="q-val">${QUEST_BAR[d.id](q.value)}</span>${extra}</div>
       <div class="q-reward"><span>${q.done ? "✅" : "🔒"}</span><em>+${Math.round(Shared.QUEST_BOOST * 100)}%</em></div></div>`;
   }).join("") + `<div class="quest final${off.unlocked ? " done" : ""}"><div class="q-ico">🌙</div><div class="q-main"><b>All 5 quests → Offline Earnings</b>
-      <small>Keep earning cash and $MINE for up to ${off.maxHours} hours after you close the game (cash at 50%). Needs all five quests at the same time.</small></div><div class="q-reward"><span>${off.unlocked ? "✅" : "🔒"}</span></div></div>`;
+      <small>Keep earning cash and $AFKMINE for up to ${off.maxHours} hours after you close the game (cash at 50%). Needs all five quests at the same time.</small></div><div class="q-reward"><span>${off.unlocked ? "✅" : "🔒"}</span></div></div>`;
   if ($("lk-in")) { $("lk-in").value = keep; }
 }
 async function earnClick(e) {

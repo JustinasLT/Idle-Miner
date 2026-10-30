@@ -8,7 +8,7 @@
   const S = {};
 
   S.TOTAL_FLOORS = 30;
-  S.PAGE_SIZE = 48; S.MAX_PAGES = 5; S.PAGE_COST = [0, 300, 800, 2000, 5000]; // $MINE price of backpack page n+1
+  S.PAGE_SIZE = 48; S.MAX_PAGES = 5; S.PAGE_COST = [0, 300, 800, 2000, 5000]; // $AFKMINE price of backpack page n+1
   S.ITEM_LVL_SPREAD = 10;
   S.DROP_P0 = 0.0002;
   S.HERO_MAX = 100;                 // the "Manager" (internal name: hero)
@@ -19,7 +19,7 @@
   S.SHARD_P = 0.00005;              // chance per finished miner trip on floor 15 (+8 % per floor deeper)
   S.SHARD_DEPTH_BONUS = 0.08;
 
-  // ---- price of unlocking floor n (1-based). Floors 1-10: coins. 11-20: coins + $MINE. 21-30: coins + $MINE + Mine Shards. ----
+  // ---- price of unlocking floor n (1-based). Floors 1-10: coins. 11-20: coins + $AFKMINE. 21-30: coins + $AFKMINE + Mine Shards. ----
   S.UNLOCK_MINE = [40, 60, 80, 110, 150, 200, 260, 340, 440, 560,            // floors 11-20
                    450, 550, 650, 800, 950, 1100, 1300, 1500, 1750, 2000];   // floors 21-30
   S.UNLOCK_SHARDS = [2, 3, 4, 5, 6, 8, 10, 12, 15, 20];                       // floors 21-30
@@ -34,15 +34,15 @@
   S.BAG_ITEMS = {
     shards: { icon: "💠", name: "Mine Shards", desc: "Very rare crystals found by miners from floor 15 down. Needed to unlock floors 21-30." },
     boost_xp: { icon: "📖", name: "XP Boost", boost: "xp", desc: "Use it: +100% manager XP for 2 hours." },
-    boost_earn: { icon: "💰", name: "Earnings Boost", boost: "earn", desc: "Use it: +50% earnings (cash and your $MINE share) for 2 hours." },
-    boost_power: { icon: "⚡", name: "Power Boost", boost: "power", desc: "Use it: +100% power for your $MINE share for 2 hours." },
+    boost_earn: { icon: "💰", name: "Earnings Boost", boost: "earn", desc: "Use it: +50% earnings (cash and your $AFKMINE share) for 2 hours." },
+    boost_power: { icon: "⚡", name: "Power Boost", boost: "power", desc: "Use it: +100% power for your $AFKMINE share for 2 hours." },
   };
   S.BAG_KEYS = Object.keys(S.BAG_ITEMS);
   S.BAG_MAX = 999;
 
-  // ---- rewards (daily calendar, quests). cash = minutes of your current income (at least cashMin), crates, bag items, $MINE ----
+  // ---- rewards (daily calendar, quests). cash = minutes of your current income (at least cashMin), crates, bag items, $AFKMINE ----
   S.rewardCash = (r, perSec) => (r && r.cash ? Math.max(r.cashMin || 0, Math.floor((perSec || 0) * 60 * r.cash)) : 0);
-  S.DAILY_REWARDS = [                                                  // day 1..7 of the login streak; day 7 pays $MINE
+  S.DAILY_REWARDS = [                                                  // day 1..7 of the login streak; day 7 pays $AFKMINE
     { cash: 15, cashMin: 750 },
     { crates: 1 },
     { cash: 30, cashMin: 1500 },
@@ -100,12 +100,12 @@
 
   // ---- item upgrades (+1 ... +10) ---------------------------------------------------------
   // Attempt number n (going from +n to +n+1) succeeds with UP_CHANCE[n]. A failed attempt keeps the item as it is but the
-  // price is gone. The first UP_COIN_ONLY attempts cost coins only, every later one costs coins + $MINE.
+  // price is gone. The first UP_COIN_ONLY attempts cost coins only, every later one costs coins + $AFKMINE.
   S.UP_MAX = 10;
   S.UP_BONUS = 0.10;                                                    // every + adds 10 % of the item's base stats (+100 % at +10)
   S.UP_CHANCE = [0.95, 0.90, 0.80, 0.65, 0.50, 0.40, 0.30, 0.20, 0.12, 0.07];
   S.UP_COIN_ONLY = 3;
-  S.UP_MINE = [0, 0, 0, 5, 10, 20, 40, 80, 150, 300];                   // $MINE for a Common item; multiplied by UP_MINE_RARITY
+  S.UP_MINE = [0, 0, 0, 5, 10, 20, 40, 80, 150, 300];                   // $AFKMINE for a Common item; multiplied by UP_MINE_RARITY
   S.UP_MINE_RARITY = [1, 1.5, 2, 3, 4, 6];
   S.upMult = (it) => 1 + S.UP_BONUS * (it.up || 0);
   S.itemName = (it) => S.RARITIES[it.r].n + " " + it.slot + (it.up ? " +" + it.up : "");
@@ -117,7 +117,7 @@
     return { n, next: n + 1, chance: S.UP_CHANCE[n], cash, mine: m, maxed: false };
   };
 
-  // ---- timed boosts (bought with $MINE in the shop) ---------------------------------------
+  // ---- timed boosts (bought with $AFKMINE in the shop) ---------------------------------------
   S.BOOST_MINUTES = 120;
   S.BOOST_MAX_MS = 12 * 3600e3;                                         // boosts can be stacked up to 12 h
   S.BOOST_KEYS = ["xp", "earn", "power"];
@@ -129,9 +129,9 @@
   // ---- quests: Earnings Boost (+10 % each, max +50 %) and Offline Earnings (all five) ------
   S.QUEST_BOOST = 0.10;
   S.QUESTS = [
-    { id: "hold", icon: "💎", name: "Hold 50,000 $MINE", desc: "Have at least 50,000 $MINE in your game balance. Dropping below it pauses the reward.", target: 50000 },
-    { id: "deposit", icon: "⬇️", name: "Deposit 50,000 $MINE", desc: "Deposit 50,000 $MINE in total from your wallet (Bank → Deposit).", target: 50000 },
-    { id: "spend", icon: "🔥", name: "Spend 25,000 $MINE", desc: "Spend 25,000 $MINE in total inside the game: packs, boosts, item upgrades, backpack pages.", target: 25000 },
+    { id: "hold", icon: "💎", name: "Hold 50,000 $AFKMINE", desc: "Have at least 50,000 $AFKMINE in your game balance. Dropping below it pauses the reward.", target: 50000 },
+    { id: "deposit", icon: "⬇️", name: "Deposit 0.5 SOL", desc: "Deposit 0.5 SOL in total from your wallet (Bank → Deposit).", target: 500000000 },   // target in lamports
+    { id: "spend", icon: "🔥", name: "Spend 25,000 $AFKMINE", desc: "Spend 25,000 $AFKMINE in total inside the game: packs, boosts, item upgrades, backpack pages.", target: 25000 },
     { id: "streak", icon: "⏳", name: "24h without withdrawing", desc: "Done from the start for new players. Each withdrawal restarts a 24-hour clock; the quest is complete again once it runs out.", target: 24 * 3600e3 },
     { id: "social", icon: "🔗", name: "Link X and Discord", desc: "Link your X account and your Discord account.", target: 2 },
   ];
@@ -139,7 +139,7 @@
     const q = st.q || {};
     switch (id) {
       case "hold": return st.balance || 0;
-      case "deposit": return q.deposited || 0;
+      case "deposit": return q.depDone ? 500000000 : ((st.tradeStats && st.tradeStats.depositedLamports) || 0);   // lamports; depDone = old $AFKMINE deposit quest was already finished
       case "spend": return q.spent || 0;
       // never withdrawn = already done; after a withdrawal the 24 h clock starts from that moment
       case "streak": return st.lastWithdrawAt ? Math.max(0, t - st.lastWithdrawAt) : 24 * 3600e3;
@@ -151,7 +151,7 @@
   S.questsDone = (st, t) => S.questStates(st, t).filter((q) => q.done).length;
   S.questBoost = (st, t) => Math.round(S.questsDone(st, t) * S.QUEST_BOOST * 100) / 100;
   S.offlineUnlocked = (st, t) => S.questsDone(st, t) === S.QUESTS.length;
-  // total earnings multiplier (cash and the player's share of the $MINE pool): quests + the shop boost
+  // total earnings multiplier (cash and the player's share of the $AFKMINE pool): quests + the shop boost
   S.earnBoost = (st, t) => S.questBoost(st, t) + (boostOn(st, "earn", t) ? S.BOOST_FX.earn : 0);
   S.earnMult = (st, t) => 1 + S.earnBoost(st, t);
 
@@ -278,6 +278,54 @@
     let n = 0, lv = info.level;
     while (n < 500) { const c = S.upgradeCost(info.base, lv, 1, info.cm); if (cash < c) break; cash -= c; lv++; n++; }
     return n;
+  };
+
+  // ---- $AFKMINE <-> SOL market: constant-product (x*y = k) VIRTUAL pool --------------------------------------------
+  // Used by the server to settle every trade AND by the browser to preview it, so the numbers always match.
+  // Units are integers only: SOL in lamports (1e9 per SOL), $AFKMINE in micro-tokens (1e6 per token).
+  // The reserves multiply to ~1e24, so the math is done in BigInt (exact). Rounding ALWAYS favours the pool:
+  // the fee is rounded up, the payout is rounded down. The fee stays in the pool (k grows a little with every trade).
+  S.LAMPORTS = 1e9; S.MICRO = 1e6; S.FEE_DEN = 10000;
+  const MAX_AMOUNT = (1n << 62n);
+  const toBig = (x) => {                            // positive/zero whole numbers only; floats, NaN, text, negatives -> null
+    if (typeof x === "bigint") return x >= 0n && x < MAX_AMOUNT ? x : null;
+    if (typeof x === "number") return Number.isSafeInteger(x) && x >= 0 ? BigInt(x) : null;
+    if (typeof x === "string" && /^\d{1,19}$/.test(x)) { const b = BigInt(x); return b < MAX_AMOUNT ? b : null; }
+    return null;
+  };
+  S.toBig = toBig;
+  // side "buy": amountIn = lamports of SOL paid, out = micro-$AFKMINE received.   side "sell": amountIn = micro-$AFKMINE, out = lamports.
+  S.quote = (side, solRes, tokRes, amountIn, feeBps) => {
+    const fail = (error) => ({ ok: false, error });
+    if (side !== "buy" && side !== "sell") return fail("Unknown trade side");
+    const sol = toBig(solRes), tok = toBig(tokRes), a = toBig(amountIn), bps = toBig(feeBps);
+    if (sol === null || tok === null || sol <= 0n || tok <= 0n || bps === null || bps >= 10000n) return fail("The market is not available");
+    if (a === null) return fail("Enter a whole amount");
+    if (a <= 0n) return fail("Enter an amount");
+    const fee = (a * bps + 9999n) / 10000n, net = a - fee;                       // fee rounded UP
+    if (net <= 0n) return fail("Amount is too small");
+    let out, newSol, newTok, ideal;
+    if (side === "buy") { out = (tok * net) / (sol + net); newSol = sol + a; newTok = tok - out; ideal = (a * tok) / sol; }
+    else { out = (sol * net) / (tok + net); newSol = sol - out; newTok = tok + a; ideal = (a * sol) / tok; }   // payout rounded DOWN
+    if (out <= 0n) return fail("Amount is too small");
+    const impactBps = ideal > out ? Number(((ideal - out) * 10000n) / ideal) : 0;   // total cost vs the spot price, fee included
+    return { ok: true, side, amountIn: a, fee, net, out, newSol, newTok, impactBps,
+      priceBefore: S.spotPrice(sol, tok), priceAfter: S.spotPrice(newSol, newTok) };
+  };
+  S.spotPrice = (solRes, tokRes) => Number(solRes) / Number(tokRes) / 1e3;          // SOL per 1 $AFKMINE
+  // price of a pack in micro-$AFKMINE at the pool's spot price, with the $AFKMINE discount, rounded UP to a whole token
+  S.packMicroPrice = (lamports, discount, solRes, tokRes) => {
+    const d = BigInt(Math.round(discount * 10000)), sol = toBig(solRes), tok = toBig(tokRes);
+    const raw = (BigInt(lamports) * (10000n - d) * tok + (sol * 10000n - 1n)) / (sol * 10000n);
+    const whole = 1000000n;
+    return Number(((raw + whole - 1n) / whole) * whole);
+  };
+  // "1.25" -> 1250000000 (decimals = 9 for SOL, 6 for $AFKMINE). Returns null for anything that is not a plain decimal number.
+  S.parseUnits = (str, decimals) => {
+    const m = /^(\d{0,12})(?:\.(\d{0,9}))?$/.exec(String(str == null ? "" : str).trim());
+    if (!m || (!m[1] && !m[2]) || (m[2] || "").length > decimals) return null;
+    const v = Number(m[1]) * 10 ** decimals + Number((m[2] || "").padEnd(decimals, "0") || 0);
+    return Number.isSafeInteger(v) ? v : null;
   };
 
   return S;

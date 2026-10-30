@@ -14,7 +14,7 @@ const { WALK, SWING_N, SWING_T, DROP, T_MINER, WALK_W, T_WORKER, SLOTS, SLOT_STA
   PAGE_SIZE, MAX_PAGES, PAGE_COST, ITEM_LVL_SPREAD } = Shared;
 const CONTINENTS = [{ id: "start", name: "Grasslands", shaftCount: 30 }];
 const SLOT_ICON = { Pickaxe: "⛏️", Shoes: "👟", Helmet: "⛑️", Shirt: "👕", Gloves: "🧤", Pants: "👖", Amulet: "📿", Ring: "💍" };
-// ---- $MINE economy: texts only (the server decides)
+// ---- $AFKMINE economy: texts only (the server decides)
 const TOTAL_POOL = 100e6, LB_POOL = 10e6, MINING_POOL = 5e6;
 const SEASON_DAYS = 30, SEASON_MS = SEASON_DAYS * 864e5;
 const DAILY_EMISSION = MINING_POOL / SEASON_DAYS;

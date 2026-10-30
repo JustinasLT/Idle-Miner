@@ -36,9 +36,13 @@
         <div class="boost-chips" id="boost-chips"></div>
       </div>
       <div class="hud-right">
-        <div class="currency token" id="hud-token" title="$MINE — your share of the whole server's mining, paid by the server">
-          <span class="hud-icon token-icon">M</span>
-          <div class="currency-info"><span class="currency-amount" id="token-display">0.0000</span><span class="currency-rate" id="token-rate">$MINE</span></div>
+        <div class="currency sol" id="hud-sol" title="Your SOL balance in the game — deposit and withdraw in the Bank">
+          <span class="hud-icon sol-icon">◎</span>
+          <div class="currency-info"><span class="currency-amount" id="sol-display">0</span><span class="currency-rate">SOL</span></div>
+        </div>
+        <div class="currency token" id="hud-token" title="$AFKMINE — your share of the whole server's mining, paid by the server. Trade it for SOL in the Bank.">
+          <span class="hud-icon token-icon">A</span>
+          <div class="currency-info"><span class="currency-amount" id="token-display">0.0000</span><span class="currency-rate" id="token-rate">$AFKMINE</span></div>
         </div>
         <button type="button" class="settings-btn" id="btn-settings" title="Settings">⚙️</button>
       </div>
@@ -139,7 +143,7 @@
       <div id="packs-content"></div>
     </aside>
     <aside class="side-panel hidden" id="panel-shop">
-      <div class="panel-header"><h2>🛒 Shop</h2><p class="hint">Boosts are bought with $MINE and go into your bag (Manager → BAG). Use them when you want — each lasts 2 hours.</p></div>
+      <div class="panel-header"><h2>🛒 Shop</h2><p class="hint">Boosts are bought with $AFKMINE and go into your bag (Manager → BAG). Use them when you want — each lasts 2 hours. Packs can be paid with your SOL balance or $AFKMINE.</p></div>
       <div id="shop-list"></div>
     </aside>
     <aside class="side-panel hidden" id="panel-events">
@@ -147,7 +151,7 @@
       <div class="coming-soon big"><span>🎉</span><b>Events</b><small>COMING SOON</small></div>
     </aside>
     <aside class="side-panel hidden" id="panel-bank">
-      <div class="panel-header"><h2>🏦 Bank</h2><p class="hint">Move $MINE between your wallet and the game.</p></div>
+      <div class="panel-header"><h2>🏦 Bank</h2><p class="hint">Deposit and withdraw SOL, and trade $AFKMINE for SOL.</p></div>
       <div id="bank-content"></div>
     </aside>
 
@@ -167,16 +171,16 @@
       <div class="login-card">
         <div class="login-logo">⛏️</div>
         <h1>Idle Mountain Miner</h1>
-        <p class="login-sub">Dig deep. Gear up. Mine <b>$MINE</b>.</p>
+        <p class="login-sub">Dig deep. Gear up. Mine <b>$AFKMINE</b>.</p>
         <p class="login-boot" id="boot-msg"></p>
         <div id="login-actions" class="login-actions">
           <div id="login-wallets"></div>
           <button type="button" class="login-btn guest" id="btn-guest">👤 Play as guest</button>
-          <p class="login-hint">Guests can play everything, but progress lives only in this browser (clearing site data loses it) and $MINE can't be withdrawn. Connect a wallet any time later to keep your progress and unlock packs &amp; withdrawals.</p>
+          <p class="login-hint">Guests can play everything, but progress lives only in this browser (clearing site data loses it) and guests can't trade $AFKMINE or withdraw SOL. Connect a wallet any time later to keep your progress and unlock packs &amp; withdrawals.</p>
         </div>
         <p class="login-status" id="login-status"></p>
         <p class="login-msg" id="login-msg"></p>
-        <p class="login-net">Solana test network · no real money</p>
+        <p class="login-net">Solana test network · no real money · $AFKMINE is an in-game currency (no on-chain token)</p>
       </div>
     </div>
     <div class="toast" id="toast"></div>
@@ -203,6 +207,7 @@
   <script src="js/quests.js"></script>
   <script src="js/packs.js"></script>
   <script src="js/bank.js"></script>
+  <script src="js/trade.js"></script>
   <script src="js/login.js"></script>
   <script src="js/offline.js"></script>
   <script src="js/main.js"></script>

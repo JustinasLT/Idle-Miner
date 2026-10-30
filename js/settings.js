@@ -4,12 +4,12 @@ function openSettings() {
   if (!net.info) return;
   const wallets = Wallet.list();
   const account = state.guest
-    ? `<p class="small">You are playing as a <b>guest</b>. Connect a Solana wallet to save your progress on it, buy packs and withdraw $MINE.</p>
+    ? `<p class="small">You are playing as a <b>guest</b>. Connect a Solana wallet to save your progress on it, buy packs, trade $AFKMINE and withdraw SOL.</p>
        ${wallets.length ? wallets.map((x) => `<button type="button" class="login-btn wallet" data-w="${x.id}">👛 Connect ${x.name}</button>`).join("") : `<p class="small dim">No wallet detected in this browser.</p>`}`
     : `<p class="small">Wallet <b class="mono">${short(state.wallet)}</b> · your progress is saved on it.</p>`;
   const tgl = (k, icon, label) => `<button type="button" class="tgl${Sound.prefs[k] ? " on" : ""}" data-snd="${k}"><span>${icon} ${label}</span><b>${Sound.prefs[k] ? "ON" : "OFF"}</b></button>`;
   openModal(`<h2>⚙️ Settings</h2>
-    <div class="set-sec"><h3>Account</h3><p class="small">Pack: <b>${tierName()}</b>${state.paid ? "" : " · no withdrawals · mining stops at " + fmtN(net.info.free.cap) + " $MINE"}</p>${account}</div>
+    <div class="set-sec"><h3>Account</h3><p class="small">Pack: <b>${tierName()}</b>${state.paid ? "" : " · no withdrawals or selling for SOL · mining stops at " + fmtN(net.info.free.cap) + " $AFKMINE"}</p>${account}</div>
     <div class="set-sec"><h3>Audio</h3><div class="tgl-row">${tgl("sfx", "🔊", "Sounds")}${tgl("music", "🎵", "Music")}</div></div>
     <div class="set-sec"><h3>Username</h3><div class="bk-row"><input id="set-name" class="name-in" maxlength="16" value="${esc(state.name)}" /><button type="button" class="inv-btn gold" id="set-name-go">Save</button></div>
       <p class="dim small">Shown on the leaderboard · 2–16 letters, numbers, space . _ -</p></div>
@@ -37,9 +37,9 @@ function openSettings() {
     doLogout();
   };
   $("set-reset").onclick = () => typedConfirm("↺ Reset progress?",
-    "Cash, floors, manager level, gear, backpack, Mine Shards and unclaimed rewards go back to the start. Your wallet, username, packs, <b>$MINE balance</b>, boosts and quest progress are kept.", "RESET", "Reset progress", resetProgress);
+    "Cash, floors, manager level, gear, backpack, Mine Shards and unclaimed rewards go back to the start. Your wallet, username, packs, <b>$AFKMINE balance</b>, boosts and quest progress are kept.", "RESET", "Reset progress", resetProgress);
   $("set-delete").onclick = () => typedConfirm("🗑 Delete account?",
-    state.guest ? "This permanently deletes your guest account and all its progress." : "This permanently deletes your account, its progress and the packs you bought. You must withdraw or spend your $MINE first.", "DELETE", "Delete forever", deleteAccount);
+    state.guest ? "This permanently deletes your guest account and all its progress." : "This permanently deletes your account, its progress and the packs you bought. You must withdraw your SOL and spend or sell your $AFKMINE first.", "DELETE", "Delete forever", deleteAccount);
 }
 async function resetProgress() {
   const r = await netAct({ type: "reset", confirm: "RESET" });

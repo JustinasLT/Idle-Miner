@@ -23,7 +23,7 @@ function statRows(it, cmp) { // values include the +upgrade bonus
 const tile = (it, cls = "") => `<button type="button" class="bp-cell r${it.r} ${canEquip(it) ? "" : "locked-lvl"} ${cls}" style="--rc:${RARITIES[it.r].c}" data-act="pick" data-id="${it.id}"><i>${SLOT_ICON[it.slot]}</i><b>Lv${it.il}</b>${it.up ? `<em>+${it.up}</em>` : ""}${it.lock ? "<u>🔒</u>" : ""}${it.dur ? "" : "<s>!</s>"}</button>`;
 const durBar = (it) => `<div class="dur-line"><i class="dur"><u style="width:${(it.dur / it.max) * 100}%"></u></i><small>${it.dur}/${it.max}${it.dur ? "" : " BROKEN"}</small></div>`;
 
-// "Upgrade +n -> +n+1": success chance, price (coins, and $MINE from +4), and the whole chance curve at a glance
+// "Upgrade +n -> +n+1": success chance, price (coins, and $AFKMINE from +4), and the whole chance curve at a glance
 function upgradeBox(it) {
   const inf = Shared.upgradeInfo(it, activeMine());
   if (inf.maxed) return `<div class="up-box maxed"><b>✨ Maxed out: +${UP_MAX}</b></div>`;
@@ -31,7 +31,7 @@ function upgradeBox(it) {
   const curve = Shared.UP_CHANCE.map((c, i) => `<i class="${i < inf.n ? "done" : i === inf.n ? "next" : ""}" style="height:${Math.max(8, c * 100)}%" title="+${i} → +${i + 1}: ${Math.round(c * 100)}%"><u>${i + 1}</u></i>`).join("");
   return `<div class="up-box"><div class="up-head"><b>⬆ Upgrade +${inf.n} → +${inf.next}</b><span class="chip ${chance >= 70 ? "hi" : chance >= 35 ? "mid" : "lo"}">${chance}% success</span></div>
     <div class="up-curve" title="Success chance of every upgrade step">${curve}</div>
-    <div class="up-cost"><span class="${canCash ? "" : "bad"}">🪙 ${formatMoney(inf.cash)}</span>${inf.mine ? `<span class="tokc ${canMine ? "" : "bad"}">◈ ${formatToken(inf.mine)} $MINE</span>` : `<span class="dim">no $MINE needed</span>`}</div>
+    <div class="up-cost"><span class="${canCash ? "" : "bad"}">🪙 ${formatMoney(inf.cash)}</span>${inf.mine ? `<span class="tokc ${canMine ? "" : "bad"}">◈ ${formatToken(inf.mine)} $AFKMINE</span>` : `<span class="dim">no $AFKMINE needed</span>`}</div>
     <button type="button" class="inv-btn gold" data-act="upgrade" data-id="${it.id}">⬆ Upgrade to +${inf.next}</button>
     <small class="dim">+1 adds ${pct(Shared.UP_BONUS)} of the item's base stats. A failed attempt keeps the item at +${inf.n}, but the price is spent.</small></div>`;
 }
@@ -64,10 +64,10 @@ function pageBar() {
   const btns = Array.from({ length: MAX_PAGES }, (_, p) => {
     if (p < state.invPages) return `<button type="button" class="pg${INV.page === p ? " on" : ""}" data-act="page" data-p="${p}">${p + 1}</button>`;
     const next = p === state.invPages;
-    return `<button type="button" class="pg lock${next ? " next" : ""}" data-act="buypage" title="${next ? "Unlock page " + (p + 1) + " for " + formatToken(pageCost()) + " $MINE" : "Unlock previous pages first"}">🔒</button>`;
+    return `<button type="button" class="pg lock${next ? " next" : ""}" data-act="buypage" title="${next ? "Unlock page " + (p + 1) + " for " + formatToken(pageCost()) + " $AFKMINE" : "Unlock previous pages first"}">🔒</button>`;
   }).join("");
   const info = state.invPages >= MAX_PAGES ? `<small class="dim">All pages unlocked</small>`
-    : `<small class="dim">Page ${state.invPages + 1}: <b class="tokc">◈ ${formatToken(pageCost())}</b> $MINE</small>`;
+    : `<small class="dim">Page ${state.invPages + 1}: <b class="tokc">◈ ${formatToken(pageCost())}</b> $AFKMINE</small>`;
   return `<div class="bp-page"><span>PAGE</span>${btns}${info}</div>`;
 }
 function itemsTab() {
@@ -83,12 +83,12 @@ function itemsTab() {
     <div class="bp-grid">${cells}</div>${detailPanel()}`;
 }
 const fmtN = (n) => (n >= 1e6 ? (n / 1e6).toFixed(2) + "M" : n >= 1e4 ? (n / 1e3).toFixed(1) + "K" : Math.round(n).toLocaleString("en-US"));
-function stakeCard() { // your share of the global power and the $MINE it earns per day
+function stakeCard() { // your share of the global power and the $AFKMINE it earns per day
   const m = miningInfo(), share = m.share * 100, earned = net.info ? net.info.earned : 0;
   if (!net.info) return `<div class="inv-card stake"><h3>⚡ Mining stake · Season 0</h3><p class="dim">${net.error ? "⚠ Can't reach the game server (" + net.error + "). Mining is paused until it's back." : "Connecting to the server…"}</p></div>`;
   const note = seasonOver() ? "Season 0 has ended — mining is finished."
-    : m.free ? `You have mined the free-tier limit of ${fmtN(net.info.free.cap)} $MINE. Buy any pack (Packs tab) and mining starts again.`
-    : m.onboarding ? `🚀 Fast start: the first ${fmtN(net.info.free.onboardCap)} $MINE are paid at a boosted rate while you play. After that the normal rate below applies.`
+    : m.free ? `You have mined the free-tier limit of ${fmtN(net.info.free.cap)} $AFKMINE. Buy any pack (Packs tab) and mining starts again.`
+    : m.onboarding ? `🚀 Fast start: the first ${fmtN(net.info.free.onboardCap)} $AFKMINE are paid at a boosted rate while you play. After that the normal rate below applies.`
     : m.capped ? `Capped at ${pct(PLAYER_DAILY_CAP)} of the daily emission.`
     : m.factor < 1 ? `Only ${m.players} players so far — daily emission is scaled to ${pct(m.factor)} until ${FULL_PLAYERS} play.` : "Full daily emission is active.";
   return `<div class="inv-card stake"><h3>⚡ Mining stake · Season 0</h3>
@@ -97,8 +97,8 @@ function stakeCard() { // your share of the global power and the $MINE it earns 
     <div class="st-row"><span>Your manager power</span><b>${fmtN(m.my)}${m.powerMult > 1 ? ` <em class="up">×${m.powerMult} boost → ${fmtN(m.my * m.powerMult)}</em>` : ""}</b></div>
     <div class="st-row"><span>Earnings boost</span><b>+${Math.round(state.earnBoost.total * 100)}%</b></div>
     <div class="st-row"><span>Global power (${m.players} active players)</span><b>${fmtN(m.global)}</b></div>
-    <div class="st-row"><span>Predicted $MINE / day</span><b class="tokc">◈ ${formatToken(m.free ? 0 : m.onboarding ? m.perSec * 86400 : m.perDay)}</b></div>
-    <div class="st-row"><span>Predicted $MINE / hour</span><b class="tokc">◈ ${formatToken(m.free ? 0 : m.onboarding ? m.perSec * 3600 : m.perDay / 24)}</b></div>
+    <div class="st-row"><span>Predicted $AFKMINE / day</span><b class="tokc">◈ ${formatToken(m.free ? 0 : m.onboarding ? m.perSec * 86400 : m.perDay)}</b></div>
+    <div class="st-row"><span>Predicted $AFKMINE / hour</span><b class="tokc">◈ ${formatToken(m.free ? 0 : m.onboarding ? m.perSec * 3600 : m.perDay / 24)}</b></div>
     <div class="st-row"><span>Mined this season</span><b class="tokc">◈ ${formatToken(earned)}</b></div>
     <p class="dim small">${net.online ? "" : "⚠ Server offline — showing last known numbers. "}${note} Stronger gear, upgrades, a higher level and your earnings boost raise your share. Prediction uses today's power; others grow too.</p></div>`;
 }
@@ -135,7 +135,7 @@ function craftTab() {
   const dmg = state.inv.filter((i) => i.dur < i.max);
   return `<div class="inv-card"><h3>📦 Equipment crates (${h.crates})</h3>${h.crates ? `<p class="dim">Pick a slot to open one:</p><div class="btn-wrap">${SLOTS.map((s) => `<button type="button" class="inv-btn" data-act="crate" data-slot="${s}">${SLOT_ICON[s]}</button>`).join("")}</div>` : `<p class="dim">Crates are found while mining (pick them up with “Claim mining rewards” on the mine screen) and come with packs.</p>`}</div>
     <div class="inv-card"><h3>🔧 Workshop</h3><button type="button" class="inv-btn gold" data-act="repairall" ${dmg.length ? "" : "disabled"}>Repair all${dmg.length ? " · " + formatMoney(dmg.reduce((s, i) => s + repairCost(i, mine), 0)) : ""}</button></div>
-    <div class="inv-card"><h3>⬆ Item upgrades</h3><p class="dim">Select any item (equipped or in your backpack) on the ITEMS tab to upgrade it up to +${UP_MAX}. The first ${Shared.UP_COIN_ONLY} upgrades cost coins, the rest coins + $MINE. Each step is a gamble — the higher the level, the lower the chance.</p></div>`;
+    <div class="inv-card"><h3>⬆ Item upgrades</h3><p class="dim">Select any item (equipped or in your backpack) on the ITEMS tab to upgrade it up to +${UP_MAX}. The first ${Shared.UP_COIN_ONLY} upgrades cost coins, the rest coins + $AFKMINE. Each step is a gamble — the higher the level, the lower the chance.</p></div>`;
 }
 function renderHero() {
   const tabs = [["items", "ITEMS"], ["hero", "MANAGER"], ["bag", "BAG" + (bagCount() ? " · " + bagCount() : "")], ["craft", "WORKSHOP"]].map(([t, n]) => `<button type="button" class="inv-tab${INV.tab === t ? " on" : ""}" data-act="tab" data-tab="${t}">${n}</button>`).join("");
@@ -178,6 +178,6 @@ async function heroClick(e) {
   if (a === "crate") return send({ type: "crate", slot: d.slot });
   if (a === "buypage") {
     if (state.invPages >= MAX_PAGES) return;
-    return confirmModal("Unlock page " + (state.invPages + 1) + "?", `Spend ${formatToken(pageCost())} $MINE for 48 more backpack slots? You have ${formatToken(state.token)} $MINE.`, "Unlock", buyPage);
+    return confirmModal("Unlock page " + (state.invPages + 1) + "?", `Spend ${formatToken(pageCost())} $AFKMINE for 48 more backpack slots? You have ${formatToken(state.token)} $AFKMINE.`, "Unlock", buyPage);
   }
 }

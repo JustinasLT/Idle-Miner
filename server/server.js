@@ -101,21 +101,34 @@ async function createApp(opts = {}) {
 
     "POST /api/sync": ({ p }) => { game.touchPlayer(p); return game.view(p); },
     "GET /api/me": ({ p }) => { game.touchPlayer(p); return game.view(p); },
-    "POST /api/act": ({ p, body }) => {
+    "POST /api/act": async ({ p, body }) => {
       limit("act:" + p.id, 240, 60e3);
       const res = game.act(p, body);
+      if (game.TRADE_TYPES.has(body.type)) await game.saveNow([p]);   // a trade is durable (player + pool + trade row) before the player hears "ok"
       return { ok: true, ...res, ...game.view(p) };
+    },
+    // the market: public, read-only
+    "GET /api/pool": ({ ip }) => { limit("pool:" + ip, 120, 60e3); return game.poolView(); },
+    // operator only: treasury, liabilities, pool reserves, solvency ratio. Disabled unless ADMIN_KEY is set; send it as the x-admin-key header.
+    "GET /api/admin/solvency": async ({ req, ip }) => {
+      limit("admin:" + ip, 30, 60e3);
+      if (!env.ADMIN_KEY) throw new ApiError(404, "Unknown endpoint");
+      const h = (x) => crypto.createHash("sha256").update(String(x || "")).digest();
+      if (!crypto.timingSafeEqual(h(req.headers["x-admin-key"]), h(env.ADMIN_KEY))) throw new ApiError(403, "Forbidden");
+      let onchain = null;
+      if (chain.treasuryBalance) { try { onchain = String(await chain.treasuryBalance()); } catch (e) { onchain = "error: " + e.message; } }
+      return { cluster: SOL.cluster, treasuryAddress: chain.treasury || null, onchainLamports: onchain, ...game.solvency(), recentLedger: await store.ledger(25) };
     },
 
     "GET /api/bank": ({ p }) => { game.touchPlayer(p); return { ...bank.bankView(p), ...bank.publicConfig() }; },
-    "POST /api/bank/deposit/prepare": ({ p, body }) => { limit("bank:" + p.id, 30, 60e3); return bank.prepareDeposit(p, body.amount); },
+    "POST /api/bank/deposit/prepare": ({ p, body }) => { limit("bank:" + p.id, 30, 60e3); return bank.prepareDeposit(p, body.lamports); },
     "POST /api/bank/deposit/confirm": ({ p, body }) => { limit("bank:" + p.id, 60, 60e3); return bank.confirmDeposit(p, body.signature).then(async (r) => ({ ...r, ...game.view(p) })); },
-    "POST /api/bank/withdraw": ({ p, body }) => { limit("bank:" + p.id, 30, 60e3); return bank.requestWithdraw(p, body.amount).then((r) => ({ ...r, ...game.view(p) })); },
-    "POST /api/pack/mine": ({ p, body }) => { limit("bank:" + p.id, 30, 60e3); return bank.buyPackWithMine(p, body.pack).then((r) => ({ ...r, ...game.view(p) })); },
-    "POST /api/pack/order": ({ p, body }) => { limit("bank:" + p.id, 30, 60e3); return bank.createPackOrder(p, body.pack); },
+    "POST /api/bank/withdraw": ({ p, body }) => { limit("bank:" + p.id, 30, 60e3); return bank.requestWithdraw(p, body.lamports).then((r) => ({ ...r, ...game.view(p) })); },
+    "POST /api/pack/mine": ({ p, body }) => { limit("bank:" + p.id, 30, 60e3); return bank.buyPackWithMine(p, body.pack, body.maxMine).then((r) => ({ ...r, ...game.view(p) })); },
+    "POST /api/pack/sol": ({ p, body }) => { limit("bank:" + p.id, 30, 60e3); return bank.buyPackWithSol(p, body.pack).then((r) => ({ ...r, ...game.view(p) })); },
     "POST /api/pack/confirm": ({ p, body }) => { limit("bank:" + p.id, 60, 60e3); return bank.confirmPackOrder(p, body.order, body.signature).then((r) => ({ ...r, ...game.view(p) })); },
   };
-  const PUBLIC = new Set(["GET /api/health", "GET /api/config", "GET /api/leaderboard", "GET /api/referrals/leaderboard", "GET /api/stats", "POST /api/guest", "POST /api/auth/nonce", "POST /api/auth/wallet"]);
+  const PUBLIC = new Set(["GET /api/health", "GET /api/config", "GET /api/pool", "GET /api/admin/solvency", "GET /api/leaderboard", "GET /api/referrals/leaderboard", "GET /api/stats", "POST /api/guest", "POST /api/auth/nonce", "POST /api/auth/wallet"]);
 
   // ---- static files (whitelist only: never serve /server, .git, data files...) ------------------------------------
   const VENDOR = [["node_modules", "@solana", "web3.js", "lib", "index.iife.min.js"], ["node_modules", "@solana", "web3.js", "lib", "index.iife.js"]].map((a) => path.join(ROOT, ...a));
@@ -176,6 +189,8 @@ async function createApp(opts = {}) {
     every(5000, () => game.tick());
     every(8000, () => game.flush());
     every(10000, () => bank.processWithdrawals());
+    every(600e3, () => console.log(game.solvencyLine()));   // treasury / liabilities / pool / solvency ratio in the server log
+    console.log(game.solvencyLine());
     every(3600e3, () => game.prune());
     bank.kick();
     // Render's free plan puts the service to sleep after ~15 min without visitors: ping our own public URL.
@@ -193,7 +208,7 @@ if (require.main === module) {
     const port = num(env.PORT, 3000);
     await app.start(port);
     const { game, chain } = app;
-    console.log(`Idle Miner on http://localhost:${port}  | store: ${app.store.kind} | solana: ${SOL.cluster} | $MINE ${chain.tokenEnabled ? "on" : "OFF (" + chain.missing.join(", ") + ")"} | SOL packs ${chain.payEnabled ? "on" : "OFF"}`);
+    console.log(`Idle Miner on http://localhost:${port}  | store: ${app.store.kind} | solana: ${SOL.cluster} | SOL deposits/withdrawals ${chain.enabled ? "on (treasury " + chain.treasury + ")" : "OFF (" + chain.missing.join(", ") + ")"} | market: virtual $AFKMINE/SOL pool, no token mint`);
     if (app.store.kind === "file" && env.RENDER) console.warn("WARNING: running on Render without DATABASE_URL — player data is stored on an ephemeral disk and WILL be lost on restart. Set DATABASE_URL.");
     let closing = false;
     for (const sig of ["SIGINT", "SIGTERM"]) process.on(sig, async () => { if (closing) return; closing = true; await app.shutdown(); process.exit(0); });

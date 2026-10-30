@@ -8,8 +8,9 @@ function renderHUD() {
   setText($("cash-display"), formatMoney(state.cash));
   setText($("cash-rate"), "+" + formatMoney(rateMin) + "/min");
   setText($("token-display"), formatToken(state.token));
+  setText($("sol-display"), fmtLam(state.sol));
   const mi = miningInfo();
-  setText($("token-rate"), !net.online ? "⚠ offline" : seasonOver() ? "$MINE" : mi.free ? "🔒 free cap · get a pack" : mi.onboarding ? "🚀 +" + formatToken(mi.perSec * 3600) + "/hr" : "+" + formatToken(mi.perDay) + "/day");
+  setText($("token-rate"), !net.online ? "⚠ offline" : seasonOver() ? "$AFKMINE" : mi.free ? "🔒 free cap · get a pack" : mi.onboarding ? "🚀 +" + formatToken(mi.perSec * 3600) + "/hr" : "+" + formatToken(mi.perDay) + "/day");
   const mine = activeMine();
   setText($("wh-lvl"), mine.warehouse.level);
   setText($("el-lvl"), mine.elevator.level);

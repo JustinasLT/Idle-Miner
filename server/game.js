@@ -1,6 +1,6 @@
 "use strict";
 // The authoritative game engine. The browser only sends *intents* ("upgrade floor 3 once");
-// every number — cash, items, hero level, $MINE — is computed here from the SERVER clock.
+// every number — cash, items, hero level, $AFKMINE — is computed here from the SERVER clock.
 const crypto = require("crypto");
 const S = require("../js/shared.js");
 const { C, PRICES, SOL, PACKS, env, num } = require("./config.js");
@@ -21,7 +21,7 @@ function createGame({ store, now: nowFn, rng: rngOpt }) {
   const upRoll = rngOpt || rng; // randomness of item upgrades (tests can inject their own)
   let clockOffset = 0;
   const now = nowFn || (() => Date.now() + clockOffset + (num(env.DEV_DAY_OFFSET, 0)) * DAY);
-  const db = { season: null, players: {}, lastTick: 0, bonus: 0, withdrawals: {}, orders: {} };
+  const db = { season: null, players: {}, lastTick: 0, bonus: 0, withdrawals: {}, orders: {}, pool: null, treasury: null };
   let statsCache = { t: 0, v: null };
   const byWallet = new Map(), byRef = new Map(), dirty = new Set();
   let metaDirty = false, boardCache = { t: 0, v: null }, refCache = { t: 0, v: null };
@@ -49,17 +49,27 @@ function createGame({ store, now: nowFn, rng: rngOpt }) {
   }
 
   // ---- persistence ------------------------------------------------------------------------------
-  const meta = () => ({ season: db.season, lastTick: db.lastTick, bonus: db.bonus, withdrawals: db.withdrawals, orders: db.orders });
+  const meta = () => ({ season: db.season, lastTick: db.lastTick, bonus: db.bonus, withdrawals: db.withdrawals, orders: db.orders, pool: db.pool, treasury: db.treasury });
+  // append-only rows (full trade history, treasury ledger) travel with the next durable save
+  let extra = { trades: [], ledger: [] };
+  const takeExtra = () => { const x = extra; extra = { trades: [], ledger: [] }; return x; };
+  const putBackExtra = (x) => { extra.trades.unshift(...x.trades); extra.ledger.unshift(...x.ledger); };
+  const addLedger = (kind, p, lamports, more) => { extra.ledger.push({ t: now(), kind, pid: p ? p.id : null, lamports, ...more }); };
+  // all store writes run one after another (a mutex): the pool version in each write is always newer than the one before
+  let saveChain = Promise.resolve();
+  const serial = (fn) => { const r = saveChain.then(fn, fn); saveChain = r.then(() => {}, () => {}); return r; };
   async function load() {
     const d = await store.load();
     db.players = d.players || {};
-    Object.assign(db, { season: null, lastTick: 0, bonus: 0, withdrawals: {}, orders: {} }, d.meta || {});
+    Object.assign(db, { season: null, lastTick: 0, bonus: 0, withdrawals: {}, orders: {}, pool: null, treasury: null }, d.meta || {});
+    initMarket();
     // players saved by the old browser-trusting version have no server-side game state: forget them
     const legacy = Object.keys(db.players).filter((id) => !db.players[id].mines || !db.players[id].sessions);
     legacy.forEach((id) => delete db.players[id]);
     if (legacy.length) await store.removePlayers(legacy);
     for (const p of Object.values(db.players)) { if (p.refCode) byRef.set(p.refCode, p); }
     for (const p of Object.values(db.players)) { migrate(p); if (p.wallet) byWallet.set(p.wallet, p); }
+    migrateWithdrawals();
     for (const p of Object.values(db.players)) { if (p.referredBy && !db.players[p.referredBy]) p.referredBy = null; refAdd(p.referredBy, 1); }
     if (!db.season) { db.season = { start: env.SEASON_START ? Date.parse(env.SEASON_START) : now() }; db.lastTick = now(); touchMeta(); }
   }
@@ -81,23 +91,33 @@ function createGame({ store, now: nowFn, rng: rngOpt }) {
     p.sq = p.sq || { start: 0, prog: {}, claimed: {} };
     p.offAcc = Object.assign({ mine: 0, items: 0, crates: 0, shards: 0 }, p.offAcc);
     p.refEarned = p.refEarned || 0; p.refPaid = p.refPaid || 0; p.referredBy = p.referredBy || null;
+    // v4 additions: in-game SOL balance (integer lamports) and trading stats. Old $AFKMINE balances simply carry over 1:1 as $AFKMINE (same `balance` field).
+    p.solBalance = Number.isSafeInteger(p.solBalance) && p.solBalance > 0 ? p.solBalance : 0;
+    p.tradeStats = Object.assign({ lastTradeAt: 0, day: "", soldLamports: 0, depositedLamports: 0, refCovered: 0, bought: 0, sold: 0, trades: 0 }, p.tradeStats);
+    p.refEarnedSol = p.refEarnedSol || 0; p.refPaidSol = p.refPaidSol || 0;
+    if (p.q.depDone == null) p.q.depDone = (p.q.deposited || 0) >= 50000;   // the old "Deposit 50,000 $AFKMINE" quest: a finished one stays finished
+    if (!Number.isFinite(p.balance) || p.balance < 0) p.balance = 0;
     if (!p.refCode) { p.refCode = newRefCode(); byRef.set(p.refCode, p); dirty.add(p.id); }
     const m = p.mines && p.mines.start;
     if (m) m.maxUnlocked = Math.max(m.maxUnlocked || 0, m.unlockedShaftCount || 1);
   }
-  async function flush() {
-    if (!dirty.size && !metaDirty) return;
-    const list = [...dirty].map((id) => db.players[id]).filter(Boolean), m = metaDirty ? meta() : null;
-    dirty.clear(); metaDirty = false;
-    try { await store.save(list, m); } catch (e) { list.forEach((p) => dirty.add(p.id)); if (m) metaDirty = true; throw e; }
+  function flush() {
+    return serial(async () => {
+      if (!dirty.size && !metaDirty && !extra.trades.length && !extra.ledger.length) return;
+      const list = [...dirty].map((id) => db.players[id]).filter(Boolean), m = metaDirty || extra.trades.length || extra.ledger.length ? meta() : null, x = takeExtra();
+      dirty.clear(); metaDirty = false;
+      try { await store.save(list, m, undefined, x); } catch (e) { list.forEach((p) => dirty.add(p.id)); if (m) metaDirty = true; putBackExtra(x); throw e; }
+    });
   }
 
   // durable write of some players + all shared data (optionally claiming a used blockchain signature in the same atomic step)
-  async function saveNow(players, claim) {
-    const m = meta(); metaDirty = false;
-    players.forEach((p) => dirty.delete(p.id));
-    try { return await store.save(players, m, claim); }
-    catch (e) { players.forEach((p) => dirty.add(p.id)); metaDirty = true; throw e; }
+  function saveNow(players, claim) {
+    return serial(async () => {
+      const m = meta(), x = takeExtra(); metaDirty = false;
+      players.forEach((p) => dirty.delete(p.id));
+      try { const ok = await store.save(players, m, claim, x); if (ok === false) putBackExtra(x); return ok; }
+      catch (e) { players.forEach((p) => dirty.add(p.id)); metaDirty = true; putBackExtra(x); throw e; }
+    });
   }
 
   // ---- players ------------------------------------------------------------------------------------
@@ -106,7 +126,7 @@ function createGame({ store, now: nowFn, rng: rngOpt }) {
   // Offline Earnings (all quests done): still earning up to 8 h after closing the game. Everybody else: 15 minutes.
   const activeWindow = (p, t) => (S.offlineUnlocked(p, t) ? C.ACTIVE_MS : C.OFFLINE_FREE_MS);
   const isActive = (p, t) => p.power > 0 && t - p.lastSeen < activeWindow(p, t);
-  // a player's weight in the split of the $MINE pool: hero power (x power boost) x earnings boost. The pool itself never grows.
+  // a player's weight in the split of the $AFKMINE pool: hero power (x power boost) x earnings boost. The pool itself never grows.
   const weight = (p, t) => p.power * S.powerMult(p, t) * S.earnMult(p, t);
   const isPaid = (p) => !!(p.packs && (p.packs[1] || p.packs[2] || p.packs[3]));
   const defaultMine = () => ({ prestigeMult: 1, warehouse: { level: 1 }, elevator: { level: 1 }, shafts: Array.from({ length: S.TOTAL_FLOORS }, () => ({ level: 1 })), unlockedShaftCount: 1, maxUnlocked: 1 });
@@ -118,7 +138,7 @@ function createGame({ store, now: nowFn, rng: rngOpt }) {
     while (taken(out)) out = n.slice(0, 12) + (++k > 9 ? Math.floor(Math.random() * 9000 + 1000) : k);
     return out;
   }
-  // everything that belongs to "the game progress" (what Reset progress wipes). Wallet, name, packs, $MINE balance,
+  // everything that belongs to "the game progress" (what Reset progress wipes). Wallet, name, packs, $AFKMINE balance,
   // quest counters, boosts and the leaderboard history are NOT touched.
   function freshProgress(p, t) {
     Object.assign(p, {
@@ -134,11 +154,11 @@ function createGame({ store, now: nowFn, rng: rngOpt }) {
     const t = now(), id = crypto.randomBytes(6).toString("hex");
     const p = {
       id, sessions: [], wallet: wallet || null, name: uniqueName(name || "Miner" + Math.floor(1000 + Math.random() * 9000)),
-      created: t, lastSeen: t, packs: {}, boosts: { xp: 0, earn: 0, power: 0 }, q: { deposited: 0, spent: 0, x: null, discord: null },
-      balance: 0, earned: 0, claimed: false, history: [], lastWithdrawAt: 0,
+      created: t, lastSeen: t, packs: {}, boosts: { xp: 0, earn: 0, power: 0 }, q: { deposited: 0, depDone: false, spent: 0, x: null, discord: null },
+      balance: 0, solBalance: 0, tradeStats: { lastTradeAt: 0, day: "", soldLamports: 0, depositedLamports: 0, refCovered: 0, bought: 0, sold: 0, trades: 0 }, earned: 0, claimed: false, history: [], lastWithdrawAt: 0,
       bag: { shards: 0, boost_xp: 0, boost_earn: 0, boost_power: 0 }, daily: { last: "", streak: 0 }, dq: { day: "", prog: {}, claimed: {}, bonus: false },
       sq: { start: 0, prog: {}, claimed: {} }, offAcc: { mine: 0, items: 0, crates: 0, shards: 0 },
-      refCode: newRefCode(), referredBy: null, refEarned: 0, refPaid: 0,
+      refCode: newRefCode(), referredBy: null, refEarned: 0, refPaid: 0, refEarnedSol: 0, refPaidSol: 0,
     };
     // referral link (?ref=CODE): only a brand-new account can be referred, never by itself or by an account with the same wallet
     const r = ref ? byRef.get(String(ref).toUpperCase().slice(0, 12)) : null;
@@ -263,7 +283,7 @@ function createGame({ store, now: nowFn, rng: rngOpt }) {
     if (!(cash >= 0) || !isFinite(cash)) cash = 0;
     if (!online) {
       // Away: cash is held for the "Welcome back" collect; items, crates and Mine Shards found meanwhile go to the
-      // normal reward stash (Claim mining rewards); $MINE is mined by tick() into the balance and tallied there.
+      // normal reward stash (Claim mining rewards); $AFKMINE is mined by tick() into the balance and tallied there.
       const rate = unlocked ? C.OFFLINE_CASH_RATE : 1;
       p.pendingOffline += cash * rate;
       const found = rollDrops(p, t0, (span / 1000) * rate);
@@ -338,12 +358,12 @@ function createGame({ store, now: nowFn, rng: rngOpt }) {
     got.cash = S.rewardCash(r, S.income(p, t).perSec);
     if (got.cash) p.cash += got.cash;
     if (r.crates) { p.hero.crates += r.crates; got.crates = r.crates; }
-    if (r.mine) { p.balance += r.mine; p.earned += r.mine; got.mine = r.mine; } // counts as mined $MINE (same pool, same leaderboard)
+    if (r.mine) { const m = mint(p, r.mine); p.earned += m; got.mine = m; } // counts as mined $AFKMINE (same pool, same leaderboard)
     for (const [k, n] of Object.entries(r.bag || {})) { p.bag[k] = Math.min(S.BAG_MAX, (p.bag[k] || 0) + n); got.bag[k] = n; }
     return got;
   }
 
-  // ---- $MINE emission: every 5s the season's daily pool is split by power share ------------------
+  // ---- $AFKMINE emission: every 5s the season's daily pool is split by power share ------------------
   const room = (p) => (isPaid(p) ? Infinity : Math.max(0, C.FREE_EARN_CAP - p.earned)); // free players stop at 20 000
   function tick() {
     const t = now(), upto = Math.min(t, seasonEnd());
@@ -358,13 +378,14 @@ function createGame({ store, now: nowFn, rng: rngOpt }) {
     const pool = (C.DAILY * Math.min(1, act.length / C.FULL_PLAYERS) * dt) / 86400, cap = (C.DAILY * C.PLAYER_DAILY_CAP * dt) / 86400;
     for (const p of act) {
       let g = Math.min((pool * wt.get(p.id)) / G, cap);
-      if (upto - p.lastSeen <= C.ONLINE_GRACE_MS && p.earned < C.ONBOARD_CAP) { // fast start: the first 20 000 $MINE of an active player
+      if (upto - p.lastSeen <= C.ONLINE_GRACE_MS && p.earned < C.ONBOARD_CAP) { // fast start: the first 20 000 $AFKMINE of an active player
         const fast = Math.min(C.ONBOARD_RATE * dt, C.ONBOARD_CAP - p.earned);
         if (fast > g) { db.bonus += fast - g; g = fast; }
       }
       g = Math.min(g, room(p));
+      g = mint(p, g);
       if (g > 0) {
-        p.balance += g; p.earned += g; touch(p);
+        p.earned += g; touch(p);
         if (upto - p.lastSeen > C.ONLINE_GRACE_MS) p.offAcc.mine += g;   // mined while away: shown in "Welcome back"
       }
     }
@@ -406,25 +427,26 @@ function createGame({ store, now: nowFn, rng: rngOpt }) {
       const all = [];
       for (const q of Object.values(db.players)) {
         const n = refCount(q);
-        if (n > 0 || q.refEarned > 0) all.push({ id: q.id, name: q.name, referred: n, earned: q.refEarned });
+        if (n > 0 || q.refEarned > 0 || q.refEarnedSol > 0) all.push({ id: q.id, name: q.name, referred: n, earned: q.refEarned, earnedSol: q.refEarnedSol });
       }
-      all.sort((a, b) => b.earned - a.earned || b.referred - a.referred || a.name.localeCompare(b.name));
+      const px = spot(), val = (r) => r.earned * px + r.earnedSol / 1e9;      // rank by what they earned, SOL and $AFKMINE at today's price
+      all.sort((a, b) => val(b) - val(a) || b.referred - a.referred || a.name.localeCompare(b.name));
       refCache = { t: Date.now(), v: all };
     }
-    const all = refCache.v, row = (r, i) => ({ rank: i + 1, name: r.name, referred: r.referred, earned: r.earned });
+    const all = refCache.v, row = (r, i) => ({ rank: i + 1, name: r.name, referred: r.referred, earned: r.earned, earnedSol: r.earnedSol });
     const mine = p ? all.findIndex((r) => r.id === p.id) : -1;
     return { rate: C.REF_RATE, total: all.length, rows: all.slice(0, C.REF_BOARD_SIZE).map(row),
-      me: p ? (mine >= 0 ? row(all[mine], mine) : { rank: 0, name: p.name, referred: refCount(p), earned: p.refEarned }) : null };
+      me: p ? (mine >= 0 ? row(all[mine], mine) : { rank: 0, name: p.name, referred: refCount(p), earned: p.refEarned, earnedSol: p.refEarnedSol }) : null };
   }
   // the player's own referral page: code and the people they brought in (with what each one has paid them so far)
   function referrals(p) {
     const list = Object.values(db.players).filter((o) => o.referredBy === p.id)
-      .map((o) => ({ name: o.name, pack: isPaid(o), paid: o.refPaid || 0 })).sort((a, b) => b.paid - a.paid || a.name.localeCompare(b.name)).slice(0, 100);
-    return { code: p.refCode, rate: C.REF_RATE, count: refCount(p), earned: p.refEarned, list };
+      .map((o) => ({ name: o.name, pack: isPaid(o), paid: o.refPaid || 0, paidSol: o.refPaidSol || 0 })).sort((a, b) => (b.paid * spot() + b.paidSol / 1e9) - (a.paid * spot() + a.paidSol / 1e9) || a.name.localeCompare(b.name)).slice(0, 100);
+    return { code: p.refCode, rate: C.REF_RATE, count: refCount(p), earned: p.refEarned, earnedSol: p.refEarnedSol, list };
   }
 
   // ---- what the client gets to see ------------------------------------------------------------------------------
-  // $MINE per second the server expects to pay this player right now (used for the live estimates)
+  // $AFKMINE per second the server expects to pay this player right now (used for the live estimates)
   function rateOf(p, t, b) {
     if (over() || !isActive(p, t) || (!isPaid(p) && p.earned >= C.FREE_EARN_CAP) || !(b.globalW > 0)) return 0;
     let r = Math.min(C.DAILY * Math.min(1, b.players / C.FULL_PLAYERS) * (weight(p, t) / b.globalW), C.DAILY * C.PLAYER_DAILY_CAP) / 86400;
@@ -478,10 +500,10 @@ function createGame({ store, now: nowFn, rng: rngOpt }) {
     const t = now(), inc = S.income(p, t), m = p.mines.start;
     const out = {
       serverNow: t, id: p.id, name: p.name, wallet: p.wallet, guest: !p.wallet, packs: p.packs, paid: isPaid(p),
-      cash: p.cash, balance: p.balance, earned: p.earned, totalEarned: p.stats.totalEarned, claimed: !!p.claimed,
+      cash: p.cash, balance: p.balance, solBalance: p.solBalance, trade: tradeView(p, t), price: spot(), earned: p.earned, totalEarned: p.stats.totalEarned, claimed: !!p.claimed,
       mine: { prestigeMult: m.prestigeMult, warehouse: m.warehouse, elevator: m.elevator, shafts: m.shafts.map((s) => ({ level: s.level })), unlockedShaftCount: m.unlockedShaftCount, maxUnlocked: m.maxUnlocked },
       bag: p.bag, daily: dailyView(p, t), dailyQuests: questView(p, t, "daily"), seasonQuests: questView(p, t, "season"),
-      ref: { code: p.refCode, rate: C.REF_RATE, earned: p.refEarned, count: refCount(p), by: p.referredBy && db.players[p.referredBy] ? db.players[p.referredBy].name : null },
+      ref: { code: p.refCode, rate: C.REF_RATE, earned: p.refEarned, earnedSol: p.refEarnedSol, count: refCount(p), by: p.referredBy && db.players[p.referredBy] ? db.players[p.referredBy].name : null },
       boosts: p.boosts, hero: p.hero, inv: p.inv, eq: p.eq, invPages: p.invPages, items: p.items,
       pendingOffline: p.pendingOffline, pending: pendingView(p), devFaucet: C.DEV_FAUCET,
       quests: S.questStates(p, t), social: { x: p.q.x, discord: p.q.discord },
@@ -503,15 +525,190 @@ function createGame({ store, now: nowFn, rng: rngOpt }) {
     touch(p);
   }
 
-  // ---- player actions (every one is validated here) ------------------------------------------------------------
-  function spendMine(p, amount) {
-    if (p.balance < amount) bad("Not enough $MINE");
-    p.balance -= amount;
-    p.q.spent += amount; // counts towards the "Spend 25,000 $MINE" quest
+  // ---- the market: SOL balance, virtual $AFKMINE/SOL pool, treasury ledger, solvency ------------------------------------
+  // * SOL is only ever stored as integer lamports. $AFKMINE trades are settled in integer micro-tokens (S.quote, BigInt).
+  // * The pool (x*y=k) is a single record in the store (db.pool). Every trade is a synchronous read-modify-write of that record, so two trades
+  //   can never both run against the same reserves; the durable writes are serialized (see serial()) and carry a rising pool version `v`.
+  // * Treasury ledger (all lamports):  assets = depositsIn - withdrawnNet.  Liabilities = sum of every player's SOL balance.
+  //   Pack revenue and withdrawal fees are SOL that moved from a player's balance to the house (no new on-chain money), referral payouts come out of that
+  //   revenue. The invariant assets >= liabilities must hold; a sell or a withdrawal that would break it is refused.
+  const microOf = (x) => BigInt(Math.floor(x * 1e6 + 1e-6));
+  function initMarket() {
+    if (!db.pool) {
+      db.pool = { v: 0, n: 0, sol: String(C.POOL_INIT_LAMPORTS), tok: String(C.POOL_INIT_MICRO), initSol: String(C.POOL_INIT_LAMPORTS), initTok: String(C.POOL_INIT_MICRO),
+        feeSol: "0", feeTok: "0", minted: 0, burned: 0, reserve: C.EMISSION_RESERVE_TOKENS, trades: [], hist: [[now(), S.spotPrice(BigInt(C.POOL_INIT_LAMPORTS), BigInt(C.POOL_INIT_MICRO))]] };
+      touchMeta();
+    }
+    if (!db.treasury) { db.treasury = { depositsIn: 0, withdrawnNet: 0, withdrawFees: 0, packRevenue: 0, referralPaid: 0, legacyPacks: 0 }; touchMeta(); }
   }
+  const res = () => ({ sol: BigInt(db.pool.sol), tok: BigInt(db.pool.tok) });
+  const spot = () => { const r = res(); return S.spotPrice(r.sol, r.tok); };
+  function setRes(sol, tok) { db.pool.sol = String(sol); db.pool.tok = String(tok); db.pool.v++; recordPrice(); touchMeta(); }
+  function recordPrice() {
+    const h = db.pool.hist, t = now(), pr = spot();
+    if (h.length && t - h[h.length - 1][0] < 60e3) h[h.length - 1] = [h[h.length - 1][0], pr]; else h.push([t, pr]);
+    if (h.length > C.PRICE_HISTORY_MAX) db.pool.hist = h.slice(0, C.PRICE_HISTORY_MAX / 2).filter((_, i) => i % 2 === 0).concat(h.slice(C.PRICE_HISTORY_MAX / 2));
+  }
+  function price24h(t) {
+    const h = db.pool.hist; let old = h[0][1];
+    for (const [ht, hp] of h) { if (ht <= t - DAY) old = hp; else break; }
+    return old;
+  }
+  let circCache = { t: 0, v: 0 };
+  const circulating = () => { if (Date.now() - circCache.t > 2000) circCache = { t: Date.now(), v: Object.values(db.players).reduce((a, p) => a + p.balance, 0) }; return circCache.v; };
+
+  // $AFKMINE created by the game (mining, quests, daily, season prizes). EMISSION_MODE "reserve" pays from a finite stock instead of minting.
+  function mint(p, amt) {
+    if (!(amt > 0)) return 0;
+    if (C.EMISSION_MODE === "reserve") { amt = Math.min(amt, db.pool.reserve); if (!(amt > 0)) return 0; db.pool.reserve -= amt; }
+    p.balance += amt; db.pool.minted += amt; circCache.t = 0; touchMeta();
+    return amt;
+  }
+  // $AFKMINE that players spend on sinks (floors, boosts, repairs, packs...): burned, or recycled into the pool's token reserve
+  function sink(amount) {
+    if (!(amount > 0)) return;
+    circCache.t = 0;
+    if (C.ECONOMY_SINK_MODE === "recycle") { const r = res(); setRes(r.sol, r.tok + microOf(amount)); } else { db.pool.burned += amount; touchMeta(); }
+  }
+  // spend without the sink (the caller decides where the tokens go)
+  function debitMine(p, amount) {
+    if (!(p.balance >= amount)) bad("Not enough $AFKMINE");
+    p.balance -= amount; p.q.spent += amount;  // counts towards the "Spend 25,000 $AFKMINE" quest
+    circCache.t = 0;
+  }
+
+  const liabilities = () => Object.values(db.players).reduce((a, p) => a + p.solBalance, 0);
+  const queuedOut = () => Object.values(db.withdrawals).filter((w) => w.unit === "lamports" && (w.state === "queued" || w.state === "signed" || w.state === "sent")).reduce((a, w) => a + w.net, 0);
+  function solvency() {
+    const tr = db.treasury, liab = liabilities(), assets = tr.depositsIn - tr.withdrawnNet, r = res(), init = BigInt(db.pool.initSol);
+    return { ok: assets >= liab, assets, liabilities: liab, equity: assets - liab, ratio: liab > 0 ? assets / liab : null,
+      depositsIn: tr.depositsIn, withdrawnNet: tr.withdrawnNet, withdrawFees: tr.withdrawFees, packRevenue: tr.packRevenue, referralPaid: tr.referralPaid, queuedWithdrawals: queuedOut(),
+      poolSol: String(r.sol), poolTokens: String(r.tok), poolBackedSol: String(r.sol - init), price: S.spotPrice(r.sol, r.tok),
+      circulating: circulating(), minted: db.pool.minted, burned: db.pool.burned, emissionReserve: db.pool.reserve, players: Object.keys(db.players).length };
+  }
+  const solvencyLine = () => { const v = solvency(); return `[solvency] ${v.ok ? "OK" : "BROKEN"} assets=${(v.assets / 1e9).toFixed(4)} SOL liabilities=${(v.liabilities / 1e9).toFixed(4)} SOL ratio=${v.ratio === null ? "n/a" : v.ratio.toFixed(3)} pool=${(Number(v.poolSol) / 1e9).toFixed(3)} SOL / ${(Number(v.poolTokens) / 1e6).toFixed(0)} $AFKMINE price=${v.price.toExponential(4)} SOL circulating=${v.circulating.toFixed(0)}`; };
+
+  // ---- SOL balance movements (used by bank.js and the trade actions) ----
+  const addSol = (p, lam) => { p.solBalance += lam; touch(p); };
+  function creditDeposit(p, lamports, sig) {
+    p.solBalance += lamports; p.tradeStats.depositedLamports += lamports; db.treasury.depositsIn += lamports;
+    addLedger("deposit", p, lamports, { sig }); touch(p); touchMeta();
+  }
+  function undoDeposit(p, lamports) {
+    p.solBalance -= lamports; p.tradeStats.depositedLamports -= lamports; db.treasury.depositsIn -= lamports; extra.ledger.pop(); touchMeta();
+  }
+  // gross leaves the balance; the player receives net on-chain, fee stays with the house
+  function debitWithdraw(p, w) {
+    p.solBalance -= w.amount; db.treasury.withdrawnNet += w.net; db.treasury.withdrawFees += w.fee;
+    addLedger("withdraw", p, w.amount, { id: w.id, net: w.net, fee: w.fee }); touch(p); touchMeta();
+  }
+  function refundWithdraw(w, reason) {
+    const p = db.players[w.pid];
+    if (w.unit === "lamports") {
+      db.treasury.withdrawnNet -= w.net; db.treasury.withdrawFees -= w.fee;
+      if (p) p.solBalance += w.amount;
+      addLedger("withdraw_refund", p, w.amount, { id: w.id, net: w.net, fee: w.fee, reason: String(reason).slice(0, 120) });
+    } else if (p) { p.balance += w.amount; circCache.t = 0; }   // old token withdrawal: back to the $AFKMINE balance 1:1
+    touchMeta();
+  }
+  function spendSol(p, lamports, packId) {   // pack purchase from the SOL balance: the SOL becomes pack revenue of the house
+    if (!(p.solBalance >= lamports)) bad("Not enough SOL in your balance");
+    p.solBalance -= lamports; db.treasury.packRevenue += lamports; addLedger("pack", p, lamports, { pack: packId }); touch(p); touchMeta();
+  }
+  // current price of a pack in $AFKMINE (whole tokens): the SOL price minus the discount, at the pool's spot price
+  const packMinePrice = (pack) => { const r = res(); return S.packMicroPrice(pack.lamports, SOL.mineDiscount, r.sol, r.tok) / 1e6; };
+
+  // ---- trading ----
+  function tradeGate(p, t) {
+    if (C.TRADE_NEED_WALLET && !p.wallet) bad("Connect a Solana wallet to trade");
+    const left = p.tradeStats.lastTradeAt + C.TRADE_COOLDOWN_MS - t;
+    if (left > 0) bad("Trade cooldown — wait " + Math.ceil(left / 1000) + " s", 429);
+  }
+  function whole(x, what) {
+    const b = S.toBig(x);
+    if (b === null || b <= 0n) bad("Enter a valid " + what);
+    return b;
+  }
+  function minOutOf(b) { if (b.minOut == null) return 0n; const m = S.toBig(b.minOut); if (m === null) bad("Invalid minimum received"); return m; }
+  const poolPctBps = () => BigInt(Math.round(C.MAX_TRADE_POOL_PCT * 100));
+  function logTrade(p, side, lamports, micro, fee, feeUnit, t) {
+    const row = { id: ++db.pool.n, t, pid: p.id, name: p.name, side, lamports, micro, fee, feeUnit, price: lamports / (micro / 1e6) / 1e9, sol: db.pool.sol, tok: db.pool.tok };
+    db.pool.trades.unshift({ id: row.id, t, name: p.name, side, lamports, micro, price: row.price });
+    if (db.pool.trades.length > C.TRADES_RECENT) db.pool.trades.length = C.TRADES_RECENT;
+    extra.trades.push(row);
+  }
+  function doBuy(p, b, t) {
+    tradeGate(p, t);
+    const lam = whole(b.lamports, "amount"), minOut = minOutOf(b), r = res();
+    if (lam > BigInt(p.solBalance)) bad("Not enough SOL in your balance");
+    if (lam * 10000n > r.sol * poolPctBps()) bad("Trade too large — at most " + (Number((r.sol * poolPctBps()) / 10000n) / 1e9).toFixed(4) + " SOL per trade right now");
+    const q = S.quote("buy", r.sol, r.tok, lam, C.TRADE_FEE_BPS);
+    if (!q.ok) bad(q.error);
+    if (q.out < minOut) bad("Price moved — you would receive less than your minimum", 409);
+    const ts = p.tradeStats;
+    p.solBalance -= Number(lam); p.balance += Number(q.out) / 1e6; circCache.t = 0;
+    db.pool.feeSol = String(BigInt(db.pool.feeSol) + q.fee);
+    setRes(q.newSol, q.newTok);
+    ts.lastTradeAt = t; ts.bought += Number(lam); ts.trades++;
+    logTrade(p, "buy", Number(lam), Number(q.out), Number(q.fee), "lamports", t);
+    touch(p);
+    return { traded: { side: "buy", paid: Number(lam), received: Number(q.out), fee: Number(q.fee), impactBps: q.impactBps } };
+  }
+  function doSell(p, b, t) {
+    tradeGate(p, t);
+    if (C.SELL_NEED_PACK && !isPaid(p)) bad("Buy a pack to unlock selling $AFKMINE for SOL");
+    const tokens = whole(b.tokens, "amount"), minOut = minOutOf(b), r = res();
+    if (tokens > BigInt(Math.floor(p.balance * 1e6 + 1e-6))) bad("Not enough $AFKMINE");
+    if (tokens * 10000n > r.tok * poolPctBps()) bad("Trade too large — at most " + (Number((r.tok * poolPctBps()) / 10000n) / 1e6).toFixed(0) + " $AFKMINE per trade right now");
+    const q = S.quote("sell", r.sol, r.tok, tokens, C.TRADE_FEE_BPS);
+    if (!q.ok) bad(q.error);
+    if (q.out < minOut) bad("Price moved — you would receive less than your minimum", 409);
+    if (C.POOL_SELL_FLOOR === "backed" && q.newSol < BigInt(db.pool.initSol)) bad("The pool can only pay out SOL that buyers put in — try a smaller amount", 409);
+    const out = Number(q.out), ts = p.tradeStats, soldToday = ts.day === dayStr(t) ? ts.soldLamports : 0;   // (nothing is written until every check has passed)
+    if (soldToday + out > C.DAILY_SELL_CAP_LAMPORTS_PER_PLAYER) bad("Daily sell limit reached (" + (C.DAILY_SELL_CAP_LAMPORTS_PER_PLAYER / 1e9) + " SOL per day) — resets at 00:00 UTC", 429);
+    const sv = solvency();   // the curve may price it, but the treasury must be able to back every SOL balance
+    if (sv.assets < sv.liabilities + out) bad("Selling is paused: the game treasury cannot cover this sale right now. Try a smaller amount later.", 503);
+    p.balance = Math.max(0, p.balance - Number(tokens) / 1e6); p.solBalance += out; circCache.t = 0;
+    db.pool.feeTok = String(BigInt(db.pool.feeTok) + q.fee);
+    setRes(q.newSol, q.newTok);
+    ts.lastTradeAt = t; ts.day = dayStr(t); ts.soldLamports = soldToday + out; ts.sold += out; ts.trades++;
+    logTrade(p, "sell", out, Number(tokens), Number(q.fee), "micro", t);
+    touch(p);
+    return { traded: { side: "sell", paid: Number(tokens), received: out, fee: Number(q.fee), impactBps: q.impactBps } };
+  }
+  const TRADE_TYPES = new Set(["tradeBuy", "tradeSell"]);
+
+  // public numbers for GET /api/pool
+  function poolView() {
+    const t = now(), r = res(), pr = S.spotPrice(r.sol, r.tok), old = price24h(t);
+    return { now: t, price: pr, change24h: old > 0 ? (pr / old - 1) * 100 : 0, solReserve: String(r.sol), tokenReserve: String(r.tok), initSol: db.pool.initSol, initTokens: db.pool.initTok,
+      backedSol: String(r.sol - BigInt(db.pool.initSol)), feeBps: C.TRADE_FEE_BPS, circulating: circulating(), minted: db.pool.minted, burned: db.pool.burned,
+      emissionMode: C.EMISSION_MODE, sinkMode: C.ECONOMY_SINK_MODE, sellFloor: C.POOL_SELL_FLOOR, trades: db.pool.trades, history: db.pool.hist,
+      limits: { maxTradePct: C.MAX_TRADE_POOL_PCT, cooldownMs: C.TRADE_COOLDOWN_MS, dailySellCapLamports: C.DAILY_SELL_CAP_LAMPORTS_PER_PLAYER, needWallet: C.TRADE_NEED_WALLET, needPack: C.SELL_NEED_PACK } };
+  }
+  // what one player may do right now (part of the player view)
+  function tradeView(p, t) {
+    const ts = p.tradeStats, soldToday = ts.day === dayStr(t) ? ts.soldLamports : 0;
+    return { cooldownLeft: Math.max(0, ts.lastTradeAt + C.TRADE_COOLDOWN_MS - t), soldToday, dailyCap: C.DAILY_SELL_CAP_LAMPORTS_PER_PLAYER,
+      canTrade: !C.TRADE_NEED_WALLET || !!p.wallet, canSell: (!C.TRADE_NEED_WALLET || !!p.wallet) && (!C.SELL_NEED_PACK || isPaid(p)), bought: ts.bought, sold: ts.sold, trades: ts.trades };
+  }
+
+  // Old (pre-SOL) data: token withdrawals that were still in flight. Never-sent ones are refunded as $AFKMINE 1:1; sent ones keep being polled
+  // (bank.js) and are only refunded when the chain says they failed/expired, never earlier, so nothing can be paid twice.
+  function migrateWithdrawals() {
+    for (const w of Object.values(db.withdrawals)) {
+      if (w.unit === "lamports" || w.legacy) continue;
+      w.legacy = true; touchMeta();
+      if (w.state === "queued") { w.state = "failed"; w.error = "Token withdrawals were discontinued — refunded as $AFKMINE"; const p = db.players[w.pid]; if (p) { p.balance += w.amount; touch(p); } }
+    }
+  }
+
+  // ---- player actions (every one is validated here) ------------------------------------------------------------
+  function spendMine(p, amount) { debitMine(p, amount); sink(amount); }
   function addHistory(p, h) { p.history.unshift({ t: now(), ...h }); if (p.history.length > 40) p.history.length = 40; }
 
-  function grantPack(p, pack, how) {
+  // how = "sol" (paid from the SOL balance, spendSol already ran) | "mine" (paid in $AFKMINE: `tokens` were debited by the caller, grantPack decides where they go)
+  function grantPack(p, pack, how, tokens) {
     if (p.packs[pack.id]) bad("You already own this pack");
     p.packs[pack.id] = true;
     addXp(p, pack.xp);
@@ -523,18 +720,35 @@ function createGame({ store, now: nowFn, rng: rngOpt }) {
     addHistory(p, { type: "pack", pack: pack.id, how });
     evt(p, "📦 " + pack.name + " pack unlocked!");
     touch(p);
-    return payReferral(p, pack, how);
+    return payReferral(p, pack, how, tokens);
   }
-  // The referrer of a buyer gets C.REF_RATE (25 %) of what the buyer paid, in $MINE. Returns the referrer (so the caller can save them too).
-  function payReferral(p, pack, how) {
+  // The referrer of a buyer gets C.REF_RATE (25 %) of what the buyer paid. Returns the referrer (so the caller can save them too).
+  //  * "sol": 25 % of the price as SOL balance, out of the pack revenue that was just booked - never minted. Only if the buyer's lifetime REAL deposits
+  //           cover this pack (otherwise SOL sold out of the pool could be looped through alt accounts into real money).
+  //  * "mine": 25 % of the tokens the buyer spent go to the referrer, the rest is burned / recycled. Nothing is created.
+  function payReferral(p, pack, how, tokens) {
     const r = p.referredBy && db.players[p.referredBy];
-    if (!r || r === p) return null;
-    const spent = how === "sol" ? pack.sol * SOL.minePerSol : pack.mine;       // what the buyer spent, in $MINE terms
-    const amt = Math.floor(spent * C.REF_RATE * 1e4) / 1e4;
-    if (!(amt > 0)) return null;
-    r.balance += amt; r.refEarned += amt; p.refPaid += amt;
-    evt(r, "🤝 " + p.name + " bought a pack — you earned " + Math.floor(amt) + " $MINE!");
-    touch(r);
+    if (how === "mine") {
+      const spent = tokens || 0;
+      let amt = r && r !== p ? Math.floor(spent * C.REF_RATE * 1e4) / 1e4 : 0;
+      if (!(amt > 0)) amt = 0;
+      sink(spent - amt);
+      if (!amt) return null;
+      r.balance += amt; r.refEarned += amt; p.refPaid += amt; circCache.t = 0;
+      evt(r, "🤝 " + p.name + " bought a pack — you earned " + Math.floor(amt) + " $AFKMINE!");
+      touch(r);
+      return r;
+    }
+    if (how === "legacy" || !r || r === p) return null;   // "legacy" = an old order that was paid to the merchant wallet, not the treasury: no referral
+    const ts = p.tradeStats;
+    if (ts.depositedLamports - ts.refCovered < pack.lamports) return null;      // not paid with real money: no referral reward
+    const amt = Math.floor(pack.lamports * C.REF_RATE);
+    if (!(amt > 0) || amt > db.treasury.packRevenue - db.treasury.referralPaid) return null;
+    ts.refCovered += pack.lamports;
+    r.solBalance += amt; r.refEarnedSol += amt; p.refPaidSol += amt; db.treasury.referralPaid += amt;
+    addLedger("referral", r, amt, { from: p.id, pack: pack.id });
+    evt(r, "🤝 " + p.name + " bought a pack — you earned " + (amt / 1e9).toFixed(4) + " SOL!");
+    touch(r); touchMeta();
     return r;
   }
 
@@ -555,13 +769,13 @@ function createGame({ store, now: nowFn, rng: rngOpt }) {
       if (target === "warehouse") m.warehouse.level += n; else if (target === "elevator") m.elevator.level += n; else m.shafts[idx].level += n;
       bumpQ(p, "levels", n, t);
     },
-    // Floors 1-10 cost coins, 11-20 coins + $MINE, 21-30 coins + $MINE + Mine Shards (S.shaftUnlockCost). Nothing is taken unless all of it is there.
+    // Floors 1-10 cost coins, 11-20 coins + $AFKMINE, 21-30 coins + $AFKMINE + Mine Shards (S.shaftUnlockCost). Nothing is taken unless all of it is there.
     unlockFloor(p, b) {
       const m = p.mines.start, i = m.unlockedShaftCount;
       if (i >= S.TOTAL_FLOORS) bad("All floors are unlocked");
       const cost = S.shaftUnlockCost(i, m);
       if (!(p.cash >= cost.cash)) bad("Not enough cash");
-      if (cost.mine && !(p.balance >= cost.mine)) bad("Not enough $MINE (" + cost.mine + " needed)");
+      if (cost.mine && !(p.balance >= cost.mine)) bad("Not enough $AFKMINE (" + cost.mine + " needed)");
       if (cost.shards && !(p.bag.shards >= cost.shards)) bad("Not enough Mine Shards (" + cost.shards + " needed)");
       p.cash -= cost.cash;
       if (cost.mine) spendMine(p, cost.mine);
@@ -580,7 +794,7 @@ function createGame({ store, now: nowFn, rng: rngOpt }) {
       if (key === "free_money" || key === "free_mine") { // test faucet, no cooldown (turn it off with DEV_FAUCET=off)
         if (!C.DEV_FAUCET) bad("The test faucet is turned off on this server");
         if (key === "free_money") p.cash += Math.max(10000, p.stats.totalEarned * 0.5 + 5000);
-        else p.balance += C.DEV_MINE_AMOUNT;
+        else { p.balance += C.DEV_MINE_AMOUNT; db.pool.minted += C.DEV_MINE_AMOUNT; circCache.t = 0; touchMeta(); }
       } else if (Object.prototype.hasOwnProperty.call(BOOST_ITEMS, key)) {
         // boosts are bought as ITEMS now: they land in the bag and do nothing until the player uses them (action "useItem")
         if (p.bag[key] >= S.BAG_MAX) bad("Your bag is full of that item");
@@ -591,7 +805,7 @@ function createGame({ store, now: nowFn, rng: rngOpt }) {
       } else bad("Unknown item");
     },
     // "Welcome back": pays the cash earned while away and clears the tally of what else was found/mined meanwhile
-    // ($MINE is already in the balance; items, crates and shards wait in Claim mining rewards).
+    // ($AFKMINE is already in the balance; items, crates and shards wait in Claim mining rewards).
     claimOffline(p) {
       const amt = p.pendingOffline, a = p.offAcc;
       if (!(amt > 0) && !(a.mine > 0 || a.items || a.crates || a.shards)) bad("Nothing to collect");
@@ -610,7 +824,7 @@ function createGame({ store, now: nowFn, rng: rngOpt }) {
       p.bag[key]--; boost(p, k, S.BOOST_MINUTES, t);
       return { used: key };
     },
-    // daily login calendar: day 1-6 coins/items, day 7 $MINE. Miss a day and the week starts again.
+    // daily login calendar: day 1-6 coins/items, day 7 $AFKMINE. Miss a day and the week starts again.
     claimDaily(p, b, t) {
       const today = dayStr(t), d = p.daily;
       if (d.last === today) bad("Already claimed today — come back after 00:00 UTC");
@@ -661,7 +875,7 @@ function createGame({ store, now: nowFn, rng: rngOpt }) {
       const info = S.upgradeInfo(it, p.mines.start);
       if (info.maxed) bad("This item is already +" + S.UP_MAX);
       if (!(p.cash >= info.cash)) bad("Not enough cash");
-      if (info.mine) spendMine(p, info.mine); // throws "Not enough $MINE" before anything is taken
+      if (info.mine) spendMine(p, info.mine); // throws "Not enough $AFKMINE" before anything is taken
       p.cash -= info.cash;
       const ok = upRoll() < info.chance;
       bumpQ(p, "itemUp", 1);
@@ -680,7 +894,7 @@ function createGame({ store, now: nowFn, rng: rngOpt }) {
       if (Object.values(db.players).some((o) => o.id !== p.id && o.q && String(o.q[kind] || "").toLowerCase() === h.toLowerCase())) bad("That account is already linked to another player");
       p.q[kind] = h;
     },
-    // wipes the game progress only: wallet, name, packs, $MINE balance, boosts and quest progress stay
+    // wipes the game progress only: wallet, name, packs, $AFKMINE balance, boosts and quest progress stay
     reset(p, b, t) {
       if (b.confirm !== "RESET") bad("Confirmation missing");
       freshProgress(p, t);
@@ -727,13 +941,16 @@ function createGame({ store, now: nowFn, rng: rngOpt }) {
       if (n.length < 2) bad("Name must be 2-16 letters/numbers");
       p.name = uniqueName(n, p.id);
     },
+    // $AFKMINE <-> SOL market. tradeBuy {lamports, minOut (micro-$AFKMINE)}   tradeSell {tokens (micro-$AFKMINE), minOut (lamports)}
+    tradeBuy(p, b, t) { return doBuy(p, b, t); },
+    tradeSell(p, b, t) { return doSell(p, b, t); },
     claimPrize(p) {
       if (!over()) bad("Season is still running");
       if (p.claimed) bad("Already claimed");
       if (!isPaid(p)) bad("Buy a pack to claim your prize");
       const rank = board().rank.get(p.id) || 0, prize = prizeFor(rank);
-      p.claimed = true; p.balance += prize;
-      return { paid: prize };
+      p.claimed = true; const paid = mint(p, prize);
+      return { paid };
     },
   };
   function repairList(p, list) {
@@ -756,9 +973,10 @@ function createGame({ store, now: nowFn, rng: rngOpt }) {
     return res;
   }
 
-  // permanently delete an account. A wallet account that still holds $MINE must withdraw/spend it first (nothing is ever destroyed silently).
+  // permanently delete an account. A wallet account that still holds $AFKMINE must withdraw/spend it first (nothing is ever destroyed silently).
   async function deleteAccount(p) {
-    if (p.wallet && p.balance >= 1) bad("You still hold " + Math.floor(p.balance) + " $MINE — withdraw or spend it first");
+    if (p.wallet && p.solBalance > 0) bad("You still hold " + (p.solBalance / 1e9).toFixed(4) + " SOL — withdraw or spend it first");
+    if (p.wallet && p.balance >= 1) bad("You still hold " + Math.floor(p.balance) + " $AFKMINE — sell or spend it first");
     if (Object.values(db.withdrawals).some((w) => w.pid === p.id && (w.state === "queued" || w.state === "signed" || w.state === "sent"))) bad("A withdrawal is still in progress — try again when it has finished");
     delete db.players[p.id];
     byRef.delete(p.refCode); refAdd(p.referredBy, -1);
@@ -788,7 +1006,8 @@ function createGame({ store, now: nowFn, rng: rngOpt }) {
   return {
     db, C, S, now, saveNow, store, setClock: (ms) => { clockOffset = ms; }, load, flush, touch, touchMeta, metaDirty: () => metaDirty,
     createPlayer, findByWallet, linkWallet, newSession, authToken, dropSession, uniqueName, cleanName,
-    touchPlayer, settle, tick, view, act, leaderboard, board, mining, stats, deleteAccount, grantPack, spendMine, addHistory, evt,
+    touchPlayer, settle, tick, view, act, leaderboard, board, mining, stats, deleteAccount, grantPack, spendMine, debitMine, spendSol, addHistory, evt,
+    poolView, solvency, solvencyLine, packMinePrice, creditDeposit, undoDeposit, debitWithdraw, refundWithdraw, addSol, mint, sink, spot, TRADE_TYPES, 
     refBoard, referrals, rollQ, bumpQ, dayStr,
     isPaid, isActive, over, seasonEnd, prune, ApiError, bad, intIn, rng, ACTIONS, PACKS, SOL,
   };

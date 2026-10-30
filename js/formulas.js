@@ -1,7 +1,7 @@
 "use strict";
 // Client-side copies of the shared maths, used by the animated mine (the server pays the real numbers).
 const { unitValue, infraScale, minersFor, upgradeCost } = Shared;
-// price of the next floor: { cash, mine, shards } (floors 11+ also cost $MINE, 21+ also Mine Shards)
+// price of the next floor: { cash, mine, shards } (floors 11+ also cost $AFKMINE, 21+ also Mine Shards)
 const nextFloorCost = (mine) => Shared.shaftUnlockCost(mine.unlockedShaftCount, mine);
 
 // upgrade-cost multiplier from the equipped gear (Gloves: Upgrade Discount)

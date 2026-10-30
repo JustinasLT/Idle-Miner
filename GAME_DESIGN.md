@@ -5,19 +5,19 @@
 > Numbers marked **[tunable]** are first-pass values you can change in one place (file given).
 
 ## 1. What the game is
-An idle/tycoon mining game in the browser with a real-money-adjacent twist: the in-game token **$MINE** (a Solana SPL token) can be deposited and withdrawn. Players:
+An idle/tycoon mining game in the browser with a real-money-adjacent twist: the in-game currency **$AFKMINE** is **not** a blockchain token (there is no mint anywhere). It lives only in the database and is traded against **SOL** in a **virtual constant-product pool** (x*y=k, also only in the database). The only real on-chain operations are **SOL deposits and SOL withdrawals**. Players:
 1. Build a mine of up to **30 floors** (a "floor" is what a player calls a "mine" in chat), plus one **elevator** and one **warehouse**. Miners dig ore, the elevator lifts it, the warehouse carries it to the surface and turns it into **coins** (cash).
 2. Level up the **Manager** (internal name `hero`; renamed from "Hero", display-only) and equip **gear items** (rarity, level, +upgrades, durability).
-3. Earn **$MINE** from a daily emission pool shared by active players (30-day **season**, leaderboard prizes).
-4. Buy **packs** (SOL or $MINE) that remove the free-tier $MINE cap and give loot.
+3. Earn **$AFKMINE** from a daily emission pool shared by active players (30-day **season**, leaderboard prizes).
+4. Buy **packs** (from the in-game SOL balance, or with $AFKMINE at 10% off) that remove the free-tier cap, unlock selling $AFKMINE for SOL and give loot.
 
-Currencies / resources: **Coins** (cash), **$MINE** (token), **Mine Shards** (very rare, stackable), **crates** (open for gear), **bag items** (Shards + 3 boosts).
+Currencies / resources: **Coins** (cash), **$AFKMINE** (in-game currency; code keys `token`/`balance`/`mine` keep their old names), **SOL balance** (`solBalance`, integer lamports), **Mine Shards** (very rare, stackable), **crates** (open for gear), **bag items** (Shards + 3 boosts).
 
 ## 2. Architecture
 - **Server-authoritative.** The browser never decides outcomes. It sends an intent (`POST /api/act {type, ...}`) and receives the full player *view*. All math is in `js/shared.js`, which is loaded by BOTH server and browser (UMD) so costs shown always match costs charged.
 - Plain Node `http`, no framework. Storage: JSON file or Postgres (`server/store.js`).
 - Client: vanilla JS, global scripts loaded in order from `index.html`; CSS in `css/`. Strict CSP: **no inline scripts/handlers**.
-- Server ticks every few seconds (`tick()` in game.js) to settle income, $MINE and offline loot for players who are away.
+- Server ticks every few seconds (`tick()` in game.js) to settle income, $AFKMINE and offline loot for players who are away.
 
 ### File map
 | File | Purpose |
@@ -27,7 +27,7 @@ Currencies / resources: **Coins** (cash), **$MINE** (token), **Mine Shards** (ve
 | `server/config.js` | Env + tunables: pools, caps, offline rules, referral rate, shop `PRICES`, packs |
 | `server/bank.js`, `chain.js` | Deposits/withdrawals/pack payments on Solana |
 | `server/store.js` | Persistence (file/Postgres) |
-| `server/test.js` | 44 automated checks: `node server/test.js` |
+| `server/test.js` | 61 automated checks: `node server/test.js` |
 | `js/shared.js` | **Shared math & content tables** (floor prices, shards, daily rewards, quests, durability, income) |
 | `js/net.js` | API calls, `applyView` (server view → `state`), `?ref=` capture |
 | `js/main.js` | init, nav panels (`PANELS`) |
@@ -45,10 +45,10 @@ Currencies / resources: **Coins** (cash), **$MINE** (token), **Mine Shards** (ve
 
 ### 3.1 Mine floors (unlock prices)
 - Coins for floor *n* (1-based): `60 × 2.8^(n-1)`. (`S.shaftUnlockCost` in shared.js)
-- Floors **1-10**: coins only. Floors **11-20**: coins + **$MINE** (`S.UNLOCK_MINE` **[tunable]**: 40 … 560). Floors **21-30**: coins + $MINE (450 … 2000) + **Mine Shards** (`S.UNLOCK_SHARDS` **[tunable]**: 2,3,4,5,6,8,10,12,15,20).
+- Floors **1-10**: coins only. Floors **11-20**: coins + **$AFKMINE** (`S.UNLOCK_MINE` **[tunable]**: 40 … 560). Floors **21-30**: coins + $AFKMINE (450 … 2000) + **Mine Shards** (`S.UNLOCK_SHARDS` **[tunable]**: 2,3,4,5,6,8,10,12,15,20).
 - **Upgrades** (floor, elevator, warehouse levels) cost **coins only**.
 - Floors already owned before (older save / prestige) are remembered in `mines.start.maxUnlocked` and only cost coins to re-unlock.
-- The unlock is atomic on the server: coins, $MINE and shards are all checked and deducted together.
+- The unlock is atomic on the server: coins, $AFKMINE and shards are all checked and deducted together.
 
 ### 3.2 Mine Shards
 - Found by miners on floor **15 and deeper** (`S.SHARD_FROM`). Chance per finished ore trip `S.SHARD_P = 0.00005` on floor 15, +8% per deeper floor (`S.SHARD_DEPTH_BONUS`) **[tunable]**. Rolled with a Poisson draw so it also works offline.
@@ -57,8 +57,8 @@ Currencies / resources: **Coins** (cash), **$MINE** (token), **Mine Shards** (ve
 
 ### 3.3 Bag and boosts
 - Bag items (`S.BAG_ITEMS`): `shards`, `boost_xp`, `boost_earn`, `boost_power`.
-- **Shop boosts are items.** Buying (`buy` action) charges $MINE and adds 1 to the bag; nothing starts. The player presses **Use** (Shop or Manager → BAG → `useItem` action) to start a 2-hour boost (`S.BOOST_MINUTES`); using again adds 2 h, max 12 h stacked.
-- Boosts: XP +100% manager XP, Earnings +50% (cash and $MINE share, adds to quest boost), Power +100% manager power for the $MINE share. Prices: `PRICES` in config.js **[tunable]** (500 / 400 / 600 $MINE).
+- **Shop boosts are items.** Buying (`buy` action) charges $AFKMINE and adds 1 to the bag; nothing starts. The player presses **Use** (Shop or Manager → BAG → `useItem` action) to start a 2-hour boost (`S.BOOST_MINUTES`); using again adds 2 h, max 12 h stacked.
+- Boosts: XP +100% manager XP, Earnings +50% (cash and $AFKMINE share, adds to quest boost), Power +100% manager power for the $AFKMINE share. Prices: `PRICES` in config.js **[tunable]** (500 / 400 / 600 $AFKMINE).
 - Boosts can also be won as quest / daily rewards.
 
 ### 3.4 Durability
@@ -66,52 +66,63 @@ Currencies / resources: **Coins** (cash), **$MINE** (token), **Mine Shards** (ve
 
 ### 3.5 Offline earnings
 - Players without the *Offline Earnings* perk earn only for **15 minutes** after closing the game (`OFFLINE_FREE_MS`); with the perk (all five Earnings Boost quests done) up to **8 hours** (`OFFLINE_MAX_MS`), cash and loot at **50%** (`OFFLINE_CASH_RATE`).
-- Offline now includes **$MINE, items, crates and Mine Shards**, not just coins. The server accumulates them in `offAcc`; the "Welcome back" popup shows them (`view.offline.away`). Coins are paid on Collect, $MINE goes straight to the balance, loot waits in "Claim mining rewards".
+- Offline now includes **$AFKMINE, items, crates and Mine Shards**, not just coins. The server accumulates them in `offAcc`; the "Welcome back" popup shows them (`view.offline.away`). Coins are paid on Collect, $AFKMINE goes straight to the balance, loot waits in "Claim mining rewards".
 
 ### 3.6 Daily reward
-- 7-day streak calendar (`S.DAILY_REWARDS` **[tunable]**): day 1 coins, 2 crate, 3 coins, 4 XP Boost, 5 coins, 6 coins + 2 crates, **day 7 = 250 $MINE**. Coin rewards scale with the player's income (minutes of income, with a minimum).
+- 7-day streak calendar (`S.DAILY_REWARDS` **[tunable]**): day 1 coins, 2 crate, 3 coins, 4 XP Boost, 5 coins, 6 coins + 2 crates, **day 7 = 250 $AFKMINE**. Coin rewards scale with the player's income (minutes of income, with a minimum).
 - Claim once per UTC day. Missing a day resets to day 1. State: `p.daily`.
 
 ### 3.7 Quests
 - **Daily quests** (reset 00:00 UTC, `S.DAILY_QUESTS`): play 30 min, buy 10 upgrade levels, try 2 item upgrades, repair gear. Finishing all four unlocks a **bonus** (`S.DAILY_BONUS`).
-- **Seasonal quests** (30 days, `S.SEASON_QUESTS`): play 10 h, 1,500 levels, 30 drops, 60 item upgrades, unlock 20 floors, manager level 40, 5 shards, 14 daily claims. Rewards include $MINE.
+- **Seasonal quests** (30 days, `S.SEASON_QUESTS`): play 10 h, 1,500 levels, 30 drops, 60 item upgrades, unlock 20 floors, manager level 40, 5 shards, 14 daily claims. Rewards include $AFKMINE.
 - Progress counters are updated by the server in `bumpQ`; rewards are granted in `grant`. UI: `js/quests.js`.
-- **Boost quests** (the older "Earnings Boost" set, +10% each, max +50%): hold 50k $MINE, deposit 50k, spend 25k, 24 h without withdrawing, link X/Discord. The **"24 h without withdrawals"** quest is **already complete** for new players: it counts from the last withdrawal, and if the player never withdrew it is done (`questMetric` "streak").
+- **Boost quests** (the older "Earnings Boost" set, +10% each, max +50%): hold 50k $AFKMINE, deposit 50k, spend 25k, 24 h without withdrawing, link X/Discord. The **"24 h without withdrawals"** quest is **already complete** for new players: it counts from the last withdrawal, and if the player never withdrew it is done (`questMetric` "streak").
 
 ### 3.8 Referrals
 - Each player has a `refCode`. Link format `https://<site>/?ref=CODE`; the browser stores the code (`localStorage idleMiner_ref`) and sends it on first login (guest or wallet), where `createPlayer` links `referredBy`.
-- When the referred player buys a pack, the referrer gets **25%** (`C.REF_RATE`) of its value as **$MINE** to their game balance (`payReferral`, called from `grantPack`). SOL purchases are valued at `SOL price × MINE_PER_SOL`; $MINE purchases at the $MINE price. **Note:** for SOL purchases this $MINE is not backed by a treasury movement — it is an in-game credit; change if you want it backed.
-- Leaderboard: Ranks → Referrals; columns user, referred people, $MINE earned. API: `GET /api/referrals/leaderboard` (public), `GET /api/referrals` (own stats).
+- When the referred player buys a pack, the referrer gets **25%** (`C.REF_RATE`) **paid out of that purchase, never minted**: pack paid from the SOL balance -> 25% of the price as SOL balance, but only if the buyer's lifetime real deposits (minus already-covered packs, `refCovered`) cover the price (anti-sybil); pack paid in $AFKMINE -> 25% of the tokens spent go to the referrer, the rest is sunk. Booked in the treasury ledger as `referralPaid` against `packRevenue`.
+- Leaderboard: Ranks → Referrals; columns user, referred people, earned (SOL and $AFKMINE). API: `GET /api/referrals/leaderboard` (public), `GET /api/referrals` (own stats).
 
 ### 3.9 Income panel and bottleneck
 - 📊 button on the mine screen opens the **income per minute** panel (mines / elevator / warehouse bars, closeable, remembered). The **bottleneck** warning is a small pill with an ✕ (hidden for 10 min when closed).
 
-### 3.10 Other (unchanged)
-- **Free tier**: earns up to 20,000 $MINE (`FREE_EARN_CAP`), then $MINE earning stops until any pack is bought. First 20k are paid fast (onboarding).
-- **Packs**: Prospector 0.05 SOL, Foreman 0.15, Tycoon 0.4 (`PACKS` in config.js).
-- **Season**: 30 days, leaderboard prizes from a $MINE pool.
-- **Withdrawals**: 20% fee, max 250k, 24 h cooldown, guests can't withdraw.
-- **Item upgrades** +1..+10, success 95% → 7%, failure keeps the level but spends the price.
+### 3.10 Economy: $AFKMINE, SOL, pool, treasury
+- **Units**: SOL in integer lamports, $AFKMINE in micro-units (1e6) inside the pool; BigInt maths only. `S.quote(side, solRes, tokRes, amountIn, feeBps)` in `js/shared.js` is used by the client preview AND the server; the server recomputes and ignores client prices. Fee is taken from the input (rounded up) and stays in the pool; payout rounds down (pool-favoring).
+- **Pool** (`db.pool`): start 100 SOL / 10,000,000 $AFKMINE (price 0.00001 SOL) - **virtual**. Single atomic record with a monotonic version `v` (stores refuse a stale write). Trades: `tradeBuy {lamports, minOut}`, `tradeSell {tokens, minOut}`; result key `traded`. `GET /api/pool` is public: reserves, price, 24h change, circulating supply, last ~50 trades, price history.
+- **Limits**: fee `TRADE_FEE_BPS` (1%), max trade `MAX_TRADE_POOL_PCT` (2% of the reserve paid into), cooldown `TRADE_COOLDOWN_MS` (10 s), `DAILY_SELL_CAP_LAMPORTS_PER_PLAYER` (1 SOL/day). Guests cannot trade; selling needs a pack (`SELL_NEED_PACK`). `POOL_SELL_FLOOR=backed`: a sell may only be paid with SOL that buyers put in.
+- **Treasury ledger** (`db.treasury`): `depositsIn, withdrawnNet, withdrawFees, packRevenue, referralPaid, legacyPacks`. assets = depositsIn - withdrawnNet; liabilities = sum of player SOL balances. **Invariant: assets >= liabilities**, enforced on sells and withdrawals (503 otherwise). Admin: `GET /api/admin/solvency` (needs `ADMIN_KEY`), plus a log line at start and every 10 min.
+- **Emission**: `EMISSION_MODE=mint` (rewards minted into balances, `circulating` tracked and shown) or `reserve` (finite stock). **Sinks** (`ECONOMY_SINK_MODE`): `burn` or `recycle` into the pool. All go through `mint()`/`sink()`/`debitMine()`.
+- **Packs**: SOL price fixed (`PACKS`), $AFKMINE price dynamic = SOL price -10% at the market price (`S.packMicroPrice`), buyer may pass `maxMine` (409 if the price moved).
+- **Free tier**: earns up to 20,000 $AFKMINE (`FREE_EARN_CAP`), then earning stops until any pack is bought.
+- **Withdrawals** (SOL only): 0.01-5 SOL, 20% fee, 24 h cooldown, guests cannot withdraw. Old token withdrawals: queued ones were refunded as $AFKMINE; sent ones are polled and refunded only on failure/expiry.
+- **Season**: 30 days, leaderboard prizes from a $AFKMINE pool.
+- **Item upgrades** +1..+10, success 95% -> 7%, failure keeps the level but spends the price.
 - **Events tab**: placeholder "coming soon" (`#panel-events` in index.html).
 
 ## 4. Data model (per player, in the store)
-`id, name, wallet, token (hashed), cash, mine/token balance, hero {lvl, xp, items...}, mines.start {shafts[], unlockedShaftCount, maxUnlocked, elevator, warehouse}, inventory/equipment (items with rarity, lvl, up, dur), pending {items, crates, shards, cash}, bag {shards, boost_xp, boost_earn, boost_power}, boosts {xp, earn, power} (end timestamps), daily {day, lastClaim,...}, dq (daily quests), sq (season quests), offAcc (offline tally), refCode, referredBy, refEarned, refPaid, lastWithdrawAt, quests (boost quests), history/events`.
-`migrate()` in game.js upgrades old saves automatically (adds any missing field) — **always add new fields there**.
+`id, name, wallet, token (hashed), cash, mine/token balance, hero {lvl, xp, items...}, mines.start {shafts[], unlockedShaftCount, maxUnlocked, elevator, warehouse}, inventory/equipment (items with rarity, lvl, up, dur), pending {items, crates, shards, cash}, bag {shards, boost_xp, boost_earn, boost_power}, boosts {xp, earn, power} (end timestamps), daily {day, lastClaim,...}, dq (daily quests), sq (season quests), offAcc (offline tally), solBalance (lamports), tradeStats {lastAt, day, soldToday, depositedLamports,...}, refCode, referredBy, refEarned, refPaid, refEarnedSol, refPaidSol, lastWithdrawAt, quests (boost quests), history/events`.
+`migrate()` in game.js upgrades old saves automatically (adds any missing field) — **always add new fields there**. Global (not per player): `db.pool`, `db.treasury`, plus `trades` and `ledger` rows in the store.
 
 ## 5. API summary
 - Public: `GET /api/health, /api/config, /api/leaderboard, /api/stats, /api/referrals/leaderboard`
 - Auth: `POST /api/guest`, `/api/auth/nonce`, `/api/auth/wallet`, `/api/logout`, `/api/account/delete`
 - Player: `GET /api/referrals`, `POST /api/act` with `type` = `upgrade, unlockFloor, prestige, buy, claimOffline, useItem, claimDaily, claimQuest, claimDailyBonus, claimRewards, upgradeItem, linkSocial, reset, equip, unequip, lock, sell, sellAll, sort, autoEquip, repair, repairAll, crate, …` (see `ACTIONS` in game.js)
-- Bank: deposit / withdraw / pack purchase routes in `server/bank.js`.
+- Trade: `POST /api/act` `tradeBuy` / `tradeSell`; public `GET /api/pool`; admin `GET /api/admin/solvency` (`x-admin-key`).
+- Bank: `POST /api/bank/deposit/prepare {lamports}`, `/api/bank/deposit/confirm`, `/api/bank/withdraw {lamports}`, `/api/pack/sol {pack}`, `/api/pack/mine {pack, maxMine}` (see `server/bank.js`).
 
 ## 6. Config knobs (where to change what)
 | Want to change | Edit |
 |---|---|
-| Floor prices ($MINE / shards) | `S.UNLOCK_MINE`, `S.UNLOCK_SHARDS` in `js/shared.js` |
+| Floor prices ($AFKMINE / shards) | `S.UNLOCK_MINE`, `S.UNLOCK_SHARDS` in `js/shared.js` |
 | Shard drop rate / starting floor | `S.SHARD_P`, `S.SHARD_FROM`, `S.SHARD_DEPTH_BONUS` |
 | Daily rewards / quest lists & rewards | `S.DAILY_REWARDS`, `S.DAILY_QUESTS`, `S.DAILY_BONUS`, `S.SEASON_QUESTS` |
 | Shop boost prices | `PRICES` in `server/config.js` |
 | Boost length / max stack | `S.BOOST_MINUTES`, `S.BOOST_MAX_MS` |
+| Pool start / fee / limits | `POOL_INIT_SOL`, `POOL_INIT_TOKENS`, `TRADE_FEE_BPS`, `MAX_TRADE_POOL_PCT`, `TRADE_COOLDOWN_MS`, `DAILY_SELL_CAP_LAMPORTS_PER_PLAYER` (env or `server/config.js`) |
+| Who may trade / sell, price floor | `TRADE_NEED_WALLET`, `SELL_NEED_PACK`, `POOL_SELL_FLOOR` |
+| Emission and sinks | `EMISSION_MODE`, `EMISSION_RESERVE_TOKENS`, `ECONOMY_SINK_MODE` |
+| SOL deposit / withdraw limits | `MIN_/MAX_DEPOSIT_SOL`, `MIN_/MAX_WITHDRAW_SOL`, `WITHDRAW_FEE`, `TREASURY_RESERVE_LAMPORTS` |
+| Admin solvency endpoint, mainnet guard | `ADMIN_KEY`, `ALLOW_MAINNET` |
 | Referral percentage | `REF_RATE` (env var or config.js) |
 | Offline rules | `OFFLINE_*`, `ACTIVE_MS` in config.js |
 | Free-tier cap, onboarding | `FREE_EARN_CAP`, `ONBOARD_*` |
@@ -122,7 +133,7 @@ Currencies / resources: **Coins** (cash), **$MINE** (token), **Mine Shards** (ve
 - **Mine / floor / shaft** — one level of the mine (code says `shaft`/`floor`).
 - **Manager** — the player's character (code `hero`). **Gear / items** — equipment. **Crate** — opens into gear.
 - **Bag** — stackable items (shards + boosts). **Pending** — unclaimed mining loot.
-- **Season** — 30-day competition with $MINE prizes. **Pack** — one-time paid bundle.
+- **Season** — 30-day competition with $AFKMINE prizes. **Pack** — one-time paid bundle.
 
 ## 8. How to ask an AI for a change (template)
 1. Paste this file.
@@ -132,6 +143,9 @@ Currencies / resources: **Coins** (cash), **$MINE** (token), **Mine Shards** (ve
 
 ## 9. Known limits / assumptions
 - Shard rates and floor prices are first-pass tuning; play-test and adjust.
-- Referral payouts for SOL packs are unbacked in-game $MINE.
-- "Hero → Manager" is a display rename only (code/save keys still say `hero`).
-- Real Solana/Postgres paths were not exercised by automated tests (fake chain used). Test on testnet before mainnet.
+- **The initial 100 SOL pool reserve is virtual.** Only SOL buyers deposit is real; `POOL_SELL_FLOOR=backed` stops sells from draining SOL that does not exist, at the cost of a price floor at the start price.
+- Free-tier mined $AFKMINE can be sold once the player owns a pack (mitigation: pack requirement, daily cap, trade size limit, cooldown).
+- Old on-chain $AFKMINE holders are stranded: in-game balances carried over 1:1, but nothing exists on-chain any more.
+- Possible regulatory exposure: a currency that is tradable for SOL and withdrawable can be treated as a financial product in some jurisdictions - get advice before real money.
+- Internal keys (`token`, `balance`, `mine`, `MINE_*` helpers) keep their old names; only text and docs say $AFKMINE. "Hero -> Manager" is likewise a display rename.
+- Postgres paths (row lock, trades/ledger tables) and real Solana RPC were not exercised by automated tests (fake chain / file store). Test on devnet; mainnet is blocked unless `ALLOW_MAINNET=yes-i-have-tested-on-devnet`.

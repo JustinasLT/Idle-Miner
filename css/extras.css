@@ -121,3 +121,50 @@
 /* ---- broken gear ---- */
 .broken-note{color:#ff8a80;font-weight:900}
 .eq-card.broken{filter:saturate(.5)}
+
+/* ---- SOL balance chip + coloured amounts ---- */
+.sol-icon{font-weight:900;font-size:.95rem;color:#fff;background:radial-gradient(circle at 30% 25%,#80ffdb,#00897b 70%);box-shadow:0 0 8px rgba(0,229,200,.5),inset 0 0 0 2px rgba(255,255,255,.25)}
+.currency.sol .currency-amount{color:#a7ffeb}.currency.sol .currency-rate{color:#4db6ac}
+.solc{color:#a7ffeb;font-weight:900}
+@media (max-width:420px){.top-bar{padding:6px 6px}.hud-left,.hud-center,.hud-right{gap:4px}.currency{padding:3px 6px 3px 3px;gap:4px}.currency-amount{font-size:.78rem}.hud-icon{width:24px;height:24px}}
+.shop-bal{display:flex;justify-content:space-around;gap:8px;padding:6px 10px;margin-bottom:8px;border-radius:10px;background:rgba(0,0,0,.3);font-weight:900;font-size:.85rem}
+
+/* ---- packs: two payment buttons ---- */
+.pack-buy{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
+.pk-btn{flex:1 1 140px;display:flex;flex-direction:column;align-items:center;gap:2px;padding:9px 10px;border:0;border-radius:10px;font:inherit;font-weight:900;color:#fff;cursor:pointer}
+.pk-btn small{font-weight:700;font-size:.66rem;opacity:.85}
+.pk-btn.mine{background:linear-gradient(180deg,#7e57c2,#5e35b1)}
+.pk-btn.sol{background:linear-gradient(180deg,#26a69a,#00796b)}
+
+/* ---- bank: shell + trade tab ---- */
+#tr-root .tr-head{display:flex;flex-direction:column;gap:8px}
+.tr-pricebox{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+.tr-pricebox small{width:100%;opacity:.7;font-weight:800;letter-spacing:.06em;font-size:.65rem}
+.tr-pricebox b{font-size:1.35rem;color:#a7ffeb}
+.tr-chg{font-weight:900;font-size:.85rem}
+.tr-chg.up{color:#69f0ae}.tr-chg.dn{color:#ff8a80}
+.tr-chart{position:relative;height:120px;border-radius:10px;background:rgba(0,0,0,.3);overflow:hidden}
+.tr-chart svg{width:100%;height:100%;display:block}
+.tr-line{fill:none;stroke-width:2;vector-effect:non-scaling-stroke}
+.tr-line.up{stroke:#69f0ae}.tr-line.dn{stroke:#ff8a80}
+.tr-area.up{fill:rgba(105,240,174,.14)}.tr-area.dn{fill:rgba(255,138,128,.14)}
+.tr-hi,.tr-lo{position:absolute;right:6px;font-size:.62rem;opacity:.7;font-weight:800}
+.tr-hi{top:4px}.tr-lo{bottom:4px}
+.tr-stats{display:grid;grid-template-columns:repeat(2,1fr);gap:4px 12px;font-size:.78rem}
+.tr-toggle{display:flex;gap:6px;margin-bottom:8px}
+.tr-toggle button{flex:1;padding:9px;border:0;border-radius:9px;font:inherit;font-weight:900;color:#fff;background:rgba(255,255,255,.08);cursor:pointer}
+.tr-toggle button.on#tr-buy{background:#2e7d32}.tr-toggle button.on#tr-sell{background:#c62828}
+.tr-lbl{display:block;margin:8px 0 4px;font-weight:800;font-size:.8rem;opacity:.85}
+.tr-quote{margin:8px 0;padding:8px 10px;border-radius:9px;background:rgba(0,0,0,.28);font-size:.8rem}
+.tr-quote .bad,.bad{color:#ff8a80}
+.tr-slip{display:flex;align-items:center;gap:6px;margin:6px 0}
+.tr-sl{padding:5px 10px;border:1px solid rgba(255,255,255,.15);border-radius:8px;background:transparent;color:inherit;font:inherit;font-weight:800;font-size:.75rem;cursor:pointer}
+.tr-sl.on{background:#ff9800;color:#1a1410;border-color:#ff9800}
+.tr-go{width:100%;margin-top:6px}
+.tr-go.sell{background:linear-gradient(180deg,#e53935,#b71c1c);color:#fff}
+.tr-trades{display:flex;flex-direction:column;gap:3px;max-height:220px;overflow:auto}
+.tr-row{display:flex;justify-content:space-between;gap:8px;padding:4px 8px;border-radius:7px;font-size:.74rem;background:rgba(255,255,255,.04)}
+.tr-row.buy b{color:#69f0ae}.tr-row.sell b{color:#ff8a80}
+#bk-tabs{display:flex;gap:4px;margin-bottom:8px}
+#bk-tabs button{flex:1;padding:8px 4px;border:0;border-radius:9px;font:inherit;font-weight:900;font-size:.75rem;color:inherit;background:rgba(255,255,255,.07);cursor:pointer}
+#bk-tabs button.on{background:#ff9800;color:#1a1410}

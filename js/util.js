@@ -10,6 +10,12 @@ function formatMoney(n) {
   return "$" + v.toFixed(v >= 100 ? 0 : v >= 10 ? 1 : 2) + SUFFIX[e];
 }
 const formatToken = (n) => (n >= 1e6 ? (n / 1e6).toFixed(2) + "M" : n >= 1000 ? (n / 1000).toFixed(2) + "K" : n >= 10 ? n.toFixed(2) : n.toFixed(4));
+// SOL amounts are integer lamports everywhere; these only format them for display
+const trimZeros = (t) => (t.includes(".") ? t.replace(/0+$/, "").replace(/\.$/, "") : t);
+const fmtLam = (l, dp = 4) => { const s = (l || 0) / 1e9; return trimZeros(s >= 1000 ? s.toFixed(1) : s >= 1 ? s.toFixed(3) : s.toFixed(dp)); };
+const fmtPrice = (p) => trimZeros((p || 0).toFixed(9));      // SOL per 1 $AFKMINE
+// integer (lamports / micro-tokens) -> exact decimal text, e.g. 1250000000, 9 -> "1.25"
+const unitsText = (v, dec) => { const s = String(v).padStart(dec + 1, "0"), f = s.slice(-dec).replace(/0+$/, ""); return s.slice(0, -dec) + (f ? "." + f : ""); };
 function toast(msg) {
   const el = $("toast");
   el.textContent = msg;

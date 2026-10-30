@@ -8,7 +8,7 @@ function rewardChips(r) {
   if (r.cash) out.push(`<span class="rw">🪙 ${formatMoney(Shared.rewardCash(r, perSec))}</span>`);
   if (r.crates) out.push(`<span class="rw">📦 ×${r.crates}</span>`);
   for (const [k, n] of Object.entries(r.bag || {})) out.push(`<span class="rw${k === "shards" ? " shard" : ""}">${Shared.BAG_ITEMS[k].icon} ×${n}</span>`);
-  if (r.mine) out.push(`<span class="rw mine">◈ ${nf(r.mine)} $MINE</span>`);
+  if (r.mine) out.push(`<span class="rw mine">◈ ${nf(r.mine)} $AFKMINE</span>`);
   return `<div class="rw-row">${out.join("")}</div>`;
 }
 function rewardText(g) { // what the server actually handed out
@@ -16,7 +16,7 @@ function rewardText(g) { // what the server actually handed out
   if (g.cash) p.push("+" + formatMoney(g.cash));
   if (g.crates) p.push(g.crates + " crate" + (g.crates === 1 ? "" : "s"));
   for (const [k, n] of Object.entries(g.bag || {})) p.push(n + "× " + Shared.BAG_ITEMS[k].name);
-  if (g.mine) p.push("◈ " + nf(g.mine) + " $MINE");
+  if (g.mine) p.push("◈ " + nf(g.mine) + " $AFKMINE");
   return p.join(" · ");
 }
 const sinceView = () => performance.now() - (net.viewAt || performance.now());
@@ -41,7 +41,7 @@ function drawDaily() {
     return `<div class="daily-day${done ? " done" : ""}${today ? " today" : ""}${n === 7 ? " big" : ""}"><small>DAY ${n}</small><span class="d-ico">${dayIcon(r)}</span>${rewardChips(r)}</div>`;
   }).join("");
   $("dyn-box").innerHTML = `<h2>📅 Daily reward</h2>
-    <p class="small" style="text-align:center">Log in every day: days 1-6 give coins or items, <b>day 7 gives $MINE</b>. Miss a day and the week starts again.</p>
+    <p class="small" style="text-align:center">Log in every day: days 1-6 give coins or items, <b>day 7 gives $AFKMINE</b>. Miss a day and the week starts again.</p>
     <div class="daily-grid">${cards}</div>
     ${d.claimable ? `<button type="button" class="btn-primary wide-btn" data-daily="claim">🎁 Claim day ${d.day}</button>`
       : `<p class="daily-foot">✅ Day ${d.day} claimed. Next reward in <b id="daily-timer">${fmtHMS(d.resetsIn - sinceView())}</b> (00:00 UTC)</p>`}

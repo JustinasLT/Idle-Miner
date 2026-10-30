@@ -2,18 +2,16 @@
   "name": "idle-miner",
   "version": "2.0.0",
   "private": true,
-  "description": "Idle Mountain Miner — server-authoritative multiplayer with Solana ($MINE) deposits/withdrawals",
+  "description": "Idle Mountain Miner \u2014 server-authoritative multiplayer; in-game $AFKMINE traded against SOL in a virtual pool, real SOL deposits/withdrawals on Solana",
   "scripts": {
     "start": "node server/server.js",
     "test": "node server/test.js",
-    "setup:token": "node scripts/setup-token.js",
     "calibrate": "node scripts/calibrate.js"
   },
   "engines": {
     "node": ">=18"
   },
   "dependencies": {
-    "@solana/spl-token": "~0.4.9",
     "@solana/web3.js": "~1.98.0",
     "bs58": "^5.0.0",
     "cors": "^2.8.6",

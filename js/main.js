@@ -1,6 +1,6 @@
 "use strict";
 let lastTick = performance.now();
-const PANELS = { hero: () => renderHero(), ranks: () => renderRanks(), packs: () => renderPacks(), bank: () => renderBank(), shop: () => renderShop(), events: () => {} };
+const PANELS = { hero: () => renderHero(), ranks: () => renderRanks(), packs: () => { renderPacks(); refreshPacks(); }, bank: () => renderBank(), shop: () => renderShop(), events: () => {} };
 function setupNav() {
   document.querySelectorAll(".nav-btn").forEach((btn) => btn.addEventListener("click", () => {
     document.querySelectorAll(".nav-btn").forEach((b) => b.classList.remove("active"));

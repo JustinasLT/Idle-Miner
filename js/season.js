@@ -1,5 +1,5 @@
 "use strict";
-// Season 0 — display helpers. Power, ranks, prizes and every $MINE payout come from the server.
+// Season 0 — display helpers. Power, ranks, prizes and every $AFKMINE payout come from the server.
 const seasonOver = () => !!(net.info && net.info.season.over && Date.now() + net.offset >= net.info.season.end);
 const seasonLeftMs = () => (net.info ? Math.max(0, net.info.season.end - (Date.now() + net.offset)) : SEASON_MS);
 const heroPower = () => (net.info ? net.info.power : Shared.heroPower(state));

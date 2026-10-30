@@ -34,7 +34,7 @@ function applyView(j) {
   net.info = j; net.online = true; net.error = "";
   net.offset = j.serverNow - Date.now();
   state.cash = j.cash; net.cashBase = j.cash; net.cashRate = j.cashPerSec; net.cashAt = performance.now();
-  state.token = j.balance;
+  state.token = j.balance; state.sol = j.solBalance || 0; state.trade = j.trade || null; state.price = j.price || state.price;
   state.name = j.name; state.stats.totalEarned = j.totalEarned;
   const old = state.mines.start, m = j.mine;
   state.mines.start = {
