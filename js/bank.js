@@ -3,7 +3,7 @@
 // The only real blockchain operations are SOL deposits and SOL withdrawals. $AFKMINE is an in-game currency (no token mint).
 let bankData = null, bankBusy = false;
 const BANK_STATE = { tab: "deposit" };
-const stLabel = { queued: "Preparing…", signed: "Sending…", sent: "Confirming…", done: "Done ✓", failed: "Failed — refunded" };
+const stLabel = { pending: "⏳ Waiting for approval", approved: "Approved — sending…", queued: "Approved — sending…", signed: "Sending…", sent: "Sent — confirming…", done: "Sent ✓", rejected: "✖ Rejected", failed: "Failed — SOL stays locked, the team will retry or refund" };
 const BANK_TABS = [["deposit", "DEPOSIT"], ["withdraw", "WITHDRAW"], ["trade", "TRADE"], ["history", "HISTORY"]];
 async function renderBank() {
   const el = $("bank-content");
@@ -22,23 +22,25 @@ function depositHTML(d) {
 }
 function withdrawHTML(d) {
   const why = !d.canWithdraw ? "Buy a pack to unlock withdrawals (Packs tab)." : "";
-  const wait = d.canWithdraw ? Math.max(0, d.cooldownLeft - (performance.now() - bankData._at)) : 0, off = !!why || wait > 0;
+  const wait = d.canWithdraw ? Math.max(0, d.cooldownLeft - (performance.now() - bankData._at)) : 0;
+  const open = d.withdrawals.find((w) => w.unit === "sol" && (w.status === "pending" || w.status === "failed")), off = !!why || wait > 0 || !!open;
   return `<div class="inv-card"><h3>⬆ Withdraw SOL</h3>
       <div class="st-row"><span>Available</span><b class="solc">◎ ${fmtLam(state.sol)} SOL</b></div>
       <div class="st-row"><span>Sent to your wallet</span><b class="mono">${esc(short(d.wallet))}</b></div>
       <div class="st-row"><span>Withdrawal fee</span><b>${pct(d.withdrawFee)}</b></div>
       <div class="st-row"><span>Per withdrawal</span><b>${fmtLam(d.minWithdraw)} – ${fmtLam(d.maxWithdraw)} SOL</b></div>
       <div class="st-row"><span>Cooldown</span><b>${fmtDur(d.withdrawCooldownMs)} between withdrawals</b></div>
-      ${why ? `<p class="warn">🔒 ${why}</p>` : wait > 0 ? `<p class="warn">⏳ Next withdrawal possible in ${fmtDur(wait)}.</p>` : ""}
+      ${open ? `<p class="warn">⏳ Your request for ◎ ${fmtLam(open.amount)} SOL is ${open.status === "pending" ? "waiting for approval" : "being retried by the game team"}. The SOL is locked until then.</p>` : ""}
+      ${why ? `<p class="warn">🔒 ${why}</p>` : wait > 0 && !open ? `<p class="warn">⏳ Next withdrawal possible in ${fmtDur(wait)}.</p>` : ""}
       <div class="bk-row"><input id="bk-wd" class="name-in" type="text" inputmode="decimal" autocomplete="off" placeholder="Min ${fmtLam(d.minWithdraw)} SOL" ${off ? "disabled" : ""}/><button type="button" class="inv-btn" id="bk-wd-max" ${off ? "disabled" : ""}>Max</button><button type="button" class="inv-btn gold" id="bk-wd-go" ${off ? "disabled" : ""}>Withdraw</button></div>
       <p class="dim small" id="bk-wd-preview">Enter an amount: ${pct(d.withdrawFee)} stays with the game, you receive the rest.</p>
-      <p class="dim small">Withdrawals always go to the wallet you signed in with and usually arrive within a minute. If the game treasury is short on SOL the request is refused and nothing is taken. Withdrawing restarts the “24h without withdrawing” quest. $AFKMINE cannot be withdrawn: sell it for SOL in the Trade tab first.</p></div>`;
+      <p class="dim small">Every withdrawal is <b>checked and approved by hand</b> before it is sent, so it can take a while. The SOL is locked while it waits; if a request is rejected you get the SOL back together with the reason. Withdrawals always go to the wallet you signed in with. Withdrawing restarts the “24h without withdrawing” quest. $AFKMINE cannot be withdrawn: sell it for SOL in the Trade tab first.</p></div>`;
 }
 function historyHTML(d) {
   const dep = d.deposits.map((h) => `<div class="st-row"><span>⬇ Deposit · ${new Date(h.t).toLocaleString()}</span><b class="solc">+${fmtLam(h.lamports)} SOL</b></div>`);
   const wd = d.withdrawals.map((w) => {
     const sol = w.unit === "sol", f = sol ? (x) => fmtLam(x) + " SOL" : (x) => formatToken(x) + " $AFKMINE";
-    return `<div class="st-row"><span>⬆ ${new Date(w.created).toLocaleString()} · ${stLabel[w.state] || w.state}${sol ? "" : " · old token withdrawal"}${w.sig ? ` · <a class="linkish" target="_blank" rel="noopener noreferrer" href="${esc(Wallet.explorer(w.sig))}">view</a>` : ""}${w.error && w.state === "failed" ? `<br><small class="dim">${esc(w.error)}</small>` : ""}</span><b class="${sol ? "solc" : "tokc"}">−${f(w.amount)}<br><small class="dim">${f(w.net)} sent · fee ${f(w.fee || 0)}</small></b></div>`;
+    return `<div class="st-row"><span>⬆ ${new Date(w.created).toLocaleString()} · ${stLabel[sol ? w.status : w.state] || w.state}${w.reason ? ` · ${esc(w.reason)}` : ""}${sol ? "" : " · old token withdrawal"}${w.sig ? ` · <a class="linkish" target="_blank" rel="noopener noreferrer" href="${esc(Wallet.explorer(w.sig))}">view</a>` : ""}${w.error && w.state === "failed" ? `<br><small class="dim">${esc(w.error)}</small>` : ""}</span><b class="${sol ? "solc" : "tokc"}">−${f(w.amount)}<br><small class="dim">${f(w.net)} sent · fee ${f(w.fee || 0)}</small></b></div>`;
   });
   return `<div class="inv-card"><h3>📜 Recent activity</h3>${dep.concat(wd).join("") || `<p class="dim">Nothing yet.</p>`}</div>`;
 }
@@ -102,7 +104,7 @@ async function bankClick(e) {
     const fee = Math.ceil((lamports * Math.round(bankData.withdrawFee * 10000)) / 10000);
     return confirmModal("Withdraw?", `Take <b>${fmtLam(lamports)} SOL</b> from your balance. Fee ${pct(bankData.withdrawFee)} (${fmtLam(fee)} SOL) — <b>${fmtLam(lamports - fee)} SOL</b> are sent to ${esc(short(bankData.wallet))}. Your next withdrawal is possible in ${fmtDur(bankData.withdrawCooldownMs)}.`, "Withdraw", () => run(async () => {
       await netPost("bank/withdraw", { lamports });
-      toast("Withdrawal started — it will arrive in your wallet shortly.");
+      toast("Withdrawal requested — it is waiting for approval.");
       BANK_STATE.tab = "history";
     }));
   }
@@ -116,6 +118,6 @@ function wdPreview() { // live "you receive" line under the withdraw box
 function setupBank() {
   $("bank-content").addEventListener("click", bankClick);
   $("bank-content").addEventListener("input", (e) => { if (e.target.id === "bk-wd") wdPreview(); else if (e.target.id === "tr-amt") tradeQuoteUpdate(); });
-  setInterval(() => { if ($("panel-bank") && !$("panel-bank").classList.contains("hidden") && !bankBusy && net.token && BANK_STATE.tab === "history") renderBank(); }, 8000);
+  setInterval(() => { if ($("panel-bank") && !$("panel-bank").classList.contains("hidden") && !bankBusy && net.token && (BANK_STATE.tab === "history" || (BANK_STATE.tab === "withdraw" && $("bk-wd") && !$("bk-wd").value))) renderBank(); }, 8000);
   setupTrade();
 }

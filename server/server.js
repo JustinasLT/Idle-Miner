@@ -7,6 +7,7 @@ const { openStore } = require("./store.js");
 const { createChain } = require("./chain.js");
 const { createGame, ApiError } = require("./game.js");
 const { createBank } = require("./bank.js");
+const { createAdmin } = require("./admin.js");
 
 const ROOT = path.join(__dirname, "..");
 const MIME = { ".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8", ".js": "text/javascript; charset=utf-8" };
@@ -21,6 +22,7 @@ async function createApp(opts = {}) {
   const chain = opts.chain || createChain(SOL);
   const bank = createBank(game, chain);
   const { db, bad } = game;
+  let admin;   // (created once the rate limiter below exists)
 
   // ---- rate limiting (in memory) ------------------------------------------------------------------------
   const buckets = new Map();
@@ -34,6 +36,8 @@ async function createApp(opts = {}) {
   const RATE = num(env.RATE_LIMIT, 300);
   const TRUST_PROXY = env.TRUST_PROXY ? env.TRUST_PROXY !== "0" : !!env.RENDER; // Render sets RENDER=true
   const clientIp = (req) => (TRUST_PROXY && String(req.headers["x-forwarded-for"] || "").split(",")[0].trim()) || req.socket.remoteAddress || "?";
+
+  admin = createAdmin({ game, bank, store, chain, env, SOL, limit, ApiError, C });
 
   // ---- sign in with a Solana wallet: a one-time message that the wallet signs (no transaction, no cost) ------
   const nonces = new Map();
@@ -108,13 +112,14 @@ async function createApp(opts = {}) {
       return { ok: true, ...res, ...game.view(p) };
     },
     // the market: public, read-only
-    "GET /api/pool": ({ ip }) => { limit("pool:" + ip, 120, 60e3); return game.poolView(); },
+    "GET /api/pool": ({ ip, q }) => { limit("pool:" + ip, 120, 60e3); return game.poolView(q.get("range")); },
     // operator only: treasury, liabilities, pool reserves, solvency ratio. Disabled unless ADMIN_KEY is set; send it as the x-admin-key header.
     "GET /api/admin/solvency": async ({ req, ip }) => {
       limit("admin:" + ip, 30, 60e3);
-      if (!env.ADMIN_KEY) throw new ApiError(404, "Unknown endpoint");
+      const key = env.ADMIN_KEY || env.ADMIN_TOKEN;
+      if (!key) throw new ApiError(404, "Unknown endpoint");
       const h = (x) => crypto.createHash("sha256").update(String(x || "")).digest();
-      if (!crypto.timingSafeEqual(h(req.headers["x-admin-key"]), h(env.ADMIN_KEY))) throw new ApiError(403, "Forbidden");
+      if (!crypto.timingSafeEqual(h(req.headers["x-admin-key"]), h(key))) throw new ApiError(403, "Forbidden");
       let onchain = null;
       if (chain.treasuryBalance) { try { onchain = String(await chain.treasuryBalance()); } catch (e) { onchain = "error: " + e.message; } }
       return { cluster: SOL.cluster, treasuryAddress: chain.treasury || null, onchainLamports: onchain, ...game.solvency(), recentLedger: await store.ledger(25) };
@@ -128,14 +133,17 @@ async function createApp(opts = {}) {
     "POST /api/pack/sol": ({ p, body }) => { limit("bank:" + p.id, 30, 60e3); return bank.buyPackWithSol(p, body.pack).then((r) => ({ ...r, ...game.view(p) })); },
     "POST /api/pack/confirm": ({ p, body }) => { limit("bank:" + p.id, 60, 60e3); return bank.confirmPackOrder(p, body.order, body.signature).then((r) => ({ ...r, ...game.view(p) })); },
   };
-  const PUBLIC = new Set(["GET /api/health", "GET /api/config", "GET /api/pool", "GET /api/admin/solvency", "GET /api/leaderboard", "GET /api/referrals/leaderboard", "GET /api/stats", "POST /api/guest", "POST /api/auth/nonce", "POST /api/auth/wallet"]);
+  Object.assign(routes, admin.routes);
+  const PUBLIC = new Set([...admin.publicKeys, "GET /api/health", "GET /api/config", "GET /api/pool", "GET /api/admin/solvency", "GET /api/leaderboard", "GET /api/referrals/leaderboard", "GET /api/stats", "POST /api/guest", "POST /api/auth/nonce", "POST /api/auth/wallet"]);
 
   // ---- static files (whitelist only: never serve /server, .git, data files...) ------------------------------------
   const VENDOR = [["node_modules", "@solana", "web3.js", "lib", "index.iife.min.js"], ["node_modules", "@solana", "web3.js", "lib", "index.iife.js"]].map((a) => path.join(ROOT, ...a));
-  const STATIC_RE = /^\/(index\.html|(css|js)\/[\w.\-]+\.(css|js)|vendor\/solana-web3\.js)$/;
+  const STATIC_RE = /^\/(index\.html|admin\.html|(css|js)\/[\w.\-]+\.(css|js)|vendor\/solana-web3\.js)$/;
   function serveStatic(req, res) {
     let u; try { u = decodeURIComponent(new URL(req.url, "http://x").pathname); } catch { res.writeHead(400, SEC); return res.end("Bad request"); }
     if (u === "/") u = "/index.html";
+    if (u === "/admin" || u === "/admin/") u = "/admin.html";
+    if (u === "/admin.html" && !admin.enabled()) { res.writeHead(404, SEC); return res.end("Not found"); }
     if (req.method !== "GET" && req.method !== "HEAD") { res.writeHead(405, SEC); return res.end(); }
     if (!STATIC_RE.test(u)) { res.writeHead(404, SEC); return res.end("Not found"); }
     const file = u === "/vendor/solana-web3.js" ? VENDOR.find((f) => fs.existsSync(f)) : path.join(ROOT, u);
@@ -171,9 +179,10 @@ async function createApp(opts = {}) {
         let body = {};
         if (raw) { try { body = JSON.parse(raw); } catch { bad("Bad JSON"); } if (body === null || typeof body !== "object" || Array.isArray(body)) bad("Bad JSON"); }
         const p = auth(req);
+        if (p) game.noteIp(p, ip);
         if (!p && !PUBLIC.has(key)) bad("Not signed in", 401);
         const host = String(req.headers.host || "localhost").replace(/[^A-Za-z0-9.\-:]/g, "").slice(0, 80);
-        send(req, res, 200, await handler({ req, body, p, ip, host }));
+        send(req, res, 200, await handler({ req, body, p, ip, host, q: new URL(req.url, "http://x").searchParams }));
       } catch (e) {
         if (e instanceof ApiError) return send(req, res, e.status, { error: e.message, ...(e.extra || {}) });
         console.error(e); send(req, res, 500, { error: "Server error" });

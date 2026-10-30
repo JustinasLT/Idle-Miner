@@ -61,7 +61,7 @@ function floorRow(i) {
   row.innerHTML = `
     <div class="floor-head">
       <span class="floor-no">${i + 1}</span><span class="floor-name">${def.name}</span>
-      <span class="floor-lv"></span><span class="floor-inc"></span>
+      <span class="floor-lv"></span><span class="floor-inc"></span><span class="floor-need"></span>
     </div>
     <div class="tunnel">
       <div class="t-beams"></div><div class="t-rails"></div><i class="t-lamp"></i><i class="t-lamp l2"></i>
@@ -74,6 +74,21 @@ function floorRow(i) {
     </div>`;
   const q = (s) => row.querySelector(s), btn = q(".btn-upgrade");
   btn.addEventListener("click", () => openUpgrade("shaft", i));
-  floorUI[i] = { lane: q(".lane"), boxEl: q(".dbox"), boxVal: q(".dbox b"), lv: q(".floor-lv"), inc: q(".floor-inc"), cost: q(".up-cost"), btn };
+  floorUI[i] = { row, need: q(".floor-need"), lane: q(".lane"), boxEl: q(".dbox"), boxVal: q(".dbox b"), lv: q(".floor-lv"), inc: q(".floor-inc"), cost: q(".up-cost"), btn };
   return row;
+}
+
+// ---- power-gated floors (display side; the server decides what really works) ----
+let GATE = null;
+function gateText() {
+  if (!GATE) return "";
+  const off = GATE.active.filter((a) => !a).length;
+  return "⚡ Power " + fmtN(GATE.power) + (GATE.next ? " · next requirement " + fmtN(GATE.next.req) + " (floor " + GATE.next.floor + ")" : " · every floor is active") + (off ? " · " + off + " floor" + (off === 1 ? "" : "s") + " idle" : "");
+}
+function renderGate() {
+  const el = $("gate-pill");
+  if (!el) return;
+  const off = GATE && GATE.next;
+  el.hidden = !off;
+  if (off) setText(el, "⚡ " + fmtN(GATE.power) + " / " + fmtN(GATE.next.req) + " Power · floor " + GATE.next.floor + " idle");
 }

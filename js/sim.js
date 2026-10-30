@@ -92,6 +92,7 @@
     for (let i = 0; i < mine.unlockedShaftCount; i++) {
       const sims = minerSim[i];
       if (!sims || !sims.length) continue;
+      if (GATE && GATE.active[i] === false) continue;                 // below its Power requirement: the miners stand idle
       const sh = mine.shafts[i];
       const speed = hmult.s;
       const trip = (floorUnitRate(i, mine) * T_MINER) / sims.length;
@@ -132,8 +133,9 @@
   }
 
   function elevatorNext(e, n, cap) {
-    if (e.u >= cap * 0.999 || e.target >= n) e.target = 0;
-    else e.target += 1;
+    // value-first route (same as S.elevatorFlow): down to the deepest floor with ore, then load while riding up
+    if (e.u >= cap * 0.999 || e.target <= 1) e.target = 0;
+    else e.target -= 1;
     e.state = "move";
   }
 
@@ -143,7 +145,8 @@
     if (e.state === "idle") {
       e.t -= dt;
       if (e.t <= 0) {
-        if (mine.shafts.slice(0, n).some((s) => s.stock > 0.5)) { e.state = "move"; e.target = 1; }
+        let deep = n; while (deep > 1 && !(mine.shafts[deep - 1].stock > 0.5)) deep--;
+        if (mine.shafts[deep - 1].stock > 0.5) { e.state = "move"; e.target = deep; }
         else e.t = 0.25;
       }
     } else if (e.state === "move") {

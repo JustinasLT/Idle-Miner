@@ -202,6 +202,23 @@
     return Math.round(p);
   };
 
+  // ---- power-gated floors -----------------------------------------------------------
+  // A floor can always be bought, but it only works (ore, coins, shards, loot - online and offline) while the player's TOTAL POWER
+  // is at least FLOOR_POWER_REQ(n). Total power = manager level * 50 + equipped usable gear (rarity, level, upgrades, affixes),
+  // times the Power Boost while it runs (GATE_COUNTS_BOOST). [tunable] Floors 1..GATE_FREE_FLOORS are always on.
+  S.GATE_FREE_FLOORS = 3; S.GATE_BASE = 120; S.GATE_GROWTH = 1.2; S.GATE_COUNTS_BOOST = true;
+  S.FLOOR_POWER_REQ = Array.from({ length: 30 }, (_, i) => (i + 1 <= S.GATE_FREE_FLOORS ? 0 : Math.round((S.GATE_BASE * Math.pow(S.GATE_GROWTH, i + 1 - S.GATE_FREE_FLOORS - 1)) / 10) * 10));
+  S.floorReq = (n) => S.FLOOR_POWER_REQ[Math.min(Math.max(n, 1), S.FLOOR_POWER_REQ.length) - 1];
+  S.totalPower = (st, t) => Math.round(S.heroPower(st) * (S.GATE_COUNTS_BOOST ? S.powerMult(st, t) : 1));
+  S.floorActive = (st, t) => { const pw = S.totalPower(st, t), n = st.mines.start.unlockedShaftCount, out = []; for (let i = 0; i < n; i++) out.push(pw >= S.floorReq(i + 1)); return out; };
+  // { power, active:[bool], next: {floor, req} of the first owned-or-next floor that is still locked (null when all are on) }
+  S.gateInfo = (st, t) => {
+    const power = S.totalPower(st, t), n = st.mines.start.unlockedShaftCount, active = [];
+    let next = null;
+    for (let i = 0; i < n; i++) { const ok = power >= S.floorReq(i + 1); active.push(ok); if (!ok && !next) next = { floor: i + 1, req: S.floorReq(i + 1) }; }
+    return { power, active, next };
+  };
+
   // One bundle with everything derived from a state at time t (ms).
   S.ctx = (st) => {
     const fx = S.computeFx(st), hm = S.heroMult(st, fx);
@@ -214,8 +231,8 @@
   S.elevatorStop = (c) => 0.45 / (S.elevatorBuff(c) * (1 + 0.02 * c.mine.elevator.level));
   S.warehouseSellRate = (c) => c.mine.warehouse.level * 10 * (1 + c.fx.haste);
 
-  // Elevator simulated cycle by cycle with exactly the rules of the animation (visits floors top-down, loads until full,
-  // skips empty boxes, returns when full or at the deepest floor). Returns units/s brought up from each floor.
+  // Elevator simulated cycle by cycle with exactly the rules of the animation (drives to the deepest floor with ore, loads upwards until full,
+  // skips empty boxes, then rides up to unload). Returns units/s brought up from each floor.
   S.elevatorFlow = (P, n, travel, stop, cap) => {
     const stock = new Array(n).fill(0), got = new Array(n).fill(0);
     const WARM = 20, MEAS = 120;
@@ -225,14 +242,18 @@
       adv(0.2);                                                    // idle at the surface after unloading
       let any = false; for (let i = 0; i < n; i++) if (stock[i] > 0.5) { any = true; break; }
       if (!any) { adv(0.25); continue; }
-      let u = 0, pos = 0, target = 1;
+      // value-first route: drive down to the DEEPEST floor that has ore, then load on the way back up (deep ore is worth the most),
+      // so extra ore on shallow floors can never push more valuable ore out of the car
+      let deep = n; while (deep > 1 && !(stock[deep - 1] > 0.5)) deep--;
+      let u = 0, pos = 0, target = deep;
       const loaded = [];
+      adv(deep / travel); pos = deep;
       for (;;) {
-        adv(Math.abs(target - pos) / travel); pos = target;
+        if (target !== pos) { adv(Math.abs(target - pos) / travel); pos = target; }
         const plan = Math.min(stock[target - 1], cap - u);
         if (plan > 0.01) { stock[target - 1] -= plan; u += plan; loaded.push([target - 1, plan]); adv(stop); }
-        if (u >= cap * 0.999 || target >= n) break;
-        target++;
+        if (u >= cap * 0.999 || target <= 1) break;
+        target--;
       }
       adv(pos / travel + stop);                                    // drive up, unload
       if (tStart < 0 && t >= WARM) tStart = t;
@@ -249,7 +270,8 @@
   S.income = (st, t) => {
     const c = S.ctx(st, t), mine = c.mine, n = mine.unlockedShaftCount, lk = 1 + 2 * c.fx.lucky;
     const P = []; // ore units per second each floor puts into its box (miners also walk faster with Transit Speed)
-    for (let i = 0; i < n; i++) P.push(S.floorUnitRate(i, c) * c.hm.s * lk);
+    const act = S.floorActive(st, t);                                // floors below their Power requirement produce nothing
+    for (let i = 0; i < n; i++) P.push(act[i] ? S.floorUnitRate(i, c) * c.hm.s * lk : 0);
     const travel = S.elevatorTravel(c), stop = S.elevatorStop(c), cap = S.elevatorCapacity(c);
     const E = S.elevatorFlow(P, n, travel, stop, cap);              // units/s the elevator really brings up per floor
     let units = 0, value = 0, mineV = 0;
@@ -258,12 +280,12 @@
     const flow = units > eff ? eff / units : 1;
     const base = value * flow * (1 + c.fx.fort) * S.EFFICIENCY;
     const perSec = base * S.earnMult(st, t);
-    return { c, perSec, base, mineV, units, eff, elevV: value, whV: eff * (units ? value / units : 0) };
+    return { c, perSec, base, mineV, units, eff, active: act, elevV: value, whV: eff * (units ? value / units : 0) };
   };
   // finished miner trips per second on each unlocked floor (each trip can drop an item)
   S.tripsPerSec = (st, t) => {
-    const c = S.ctx(st, t), out = [];
-    for (let i = 0; i < c.mine.unlockedShaftCount; i++) out.push((S.minersFor(c.mine.shafts[i].level) * c.hm.s) / S.T_MINER);
+    const c = S.ctx(st, t), out = [], act = S.floorActive(st, t);
+    for (let i = 0; i < c.mine.unlockedShaftCount; i++) out.push(act[i] ? (S.minersFor(c.mine.shafts[i].level) * c.hm.s) / S.T_MINER : 0);
     return { c, trips: out };
   };
 
@@ -311,6 +333,17 @@
     const impactBps = ideal > out ? Number(((ideal - out) * 10000n) / ideal) : 0;   // total cost vs the spot price, fee included
     return { ok: true, side, amountIn: a, fee, net, out, newSol, newTok, impactBps,
       priceBefore: S.spotPrice(sol, tok), priceAfter: S.spotPrice(newSol, newTok) };
+  };
+  // largest sell (micro-$AFKMINE) whose payout still fits in `room` lamports (the treasury headroom). Binary search over the exact quote.
+  S.maxSell = (solRes, tokRes, feeBps, room, cap) => {
+    const sol = toBig(solRes), tok = toBig(tokRes), rm = toBig(room == null ? 0 : Math.max(0, Math.floor(room)));
+    let lo = 0n, hi = cap == null ? tok : toBig(cap);
+    if (sol === null || tok === null || rm === null || hi === null) return 0n;
+    while (lo < hi) {
+      const mid = (lo + hi + 1n) / 2n, q = S.quote("sell", sol, tok, mid, feeBps);
+      if (q.ok && q.out <= rm) lo = mid; else hi = mid - 1n;
+    }
+    return lo;
   };
   S.spotPrice = (solRes, tokRes) => Number(solRes) / Number(tokRes) / 1e3;          // SOL per 1 $AFKMINE
   // price of a pack in micro-$AFKMINE at the pool's spot price, with the $AFKMINE discount, rounded UP to a whole token

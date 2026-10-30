@@ -25,12 +25,15 @@ npm start           # http://localhost:3000
 | `TRADE_COOLDOWN_MS` | Per-player gap between trades (default 10000). |
 | `DAILY_SELL_CAP_LAMPORTS_PER_PLAYER` | SOL a player may receive from selling per UTC day (default 1e9 = 1 SOL). |
 | `TRADE_NEED_WALLET`, `SELL_NEED_PACK` | `0` disables: guests may trade / selling needs no pack. Default on (both required). |
-| `POOL_SELL_FLOOR` | `backed` (default): sells may only be paid with SOL that buyers put in. `off`: only the solvency check applies. |
+| `SELL_KEEP_LAMPORTS` | Treasury SOL that sells may never touch (default 0). There is **no price floor**: a sell is limited only by what the treasury can really pay (assets - balances - pending withdrawals - this value). |
 | `ECONOMY_SINK_MODE` | `burn` (default) or `recycle`: what happens to $AFKMINE spent in the game. |
 | `EMISSION_MODE`, `EMISSION_RESERVE_TOKENS` | `mint` (default): rewards are minted into balances, `circulating` rises. `reserve`: paid from a finite stock. |
-| `MIN_/MAX_DEPOSIT_SOL`, `MIN_/MAX_WITHDRAW_SOL`, `WITHDRAW_FEE` | SOL limits (withdraw 0.01-5 SOL, fee 0.2 = 20%, 24 h cooldown). |
+| `MIN_/MAX_DEPOSIT_SOL`, `WITHDRAW_FEE` | Deposit limits; withdraw fee (0.2 = 20%). |
+| `WITHDRAW_MIN_LAMPORTS`, `WITHDRAW_MAX_LAMPORTS` | Per-withdrawal limits (default 0.05 and 2 SOL). 24 h cooldown. Every withdrawal needs **manual admin approval**. |
+| `REF_T1_BPS`, `REF_T2_MIN`, `REF_T2_BPS`, `REF_T3_MIN`, `REF_T3_BPS`, `REF_T3_SHOP_BPS`, `REF_PAYOUT_DOW` | Referral tiers (defaults 20% / 3+ refs 25% / 10+ refs 30% + 5% of shop spend) and the weekly payout day shown to players (1 = Monday). |
+| `SEASON0_CUTOFF` | ISO date: accounts created before it get the golden OG tag at first start (empty = everyone who exists then). |
 | `TREASURY_RESERVE_LAMPORTS` | Safety margin kept on-chain for tx fees. |
-| `ADMIN_KEY` | Enables `GET /api/admin/solvency` (header `x-admin-key`). Unset = 404. |
+| `ADMIN_TOKEN` | Enables the admin dashboard at `/admin` (min. 16 characters, long and random). Unset = the page and `/api/admin/*` answer 404. `ADMIN_KEY` still works for `GET /api/admin/solvency`. Never reuse a player token. |
 | `ALLOW_MAINNET` | Mainnet is refused unless this is `yes-i-have-tested-on-devnet`. |
 | `DEV_FAUCET` | `on`/`off`. The "Test money" shop tab (free cash + free $AFKMINE, no cooldown). Default: on, except on `mainnet-beta`. **Turn it off before real money is involved** — it mints sellable $AFKMINE. |
 | `KEEPALIVE_URL` | Optional; defaults to `RENDER_EXTERNAL_URL`. The server pings its own `/api/health` every 10 min. |
@@ -39,7 +42,7 @@ npm start           # http://localhost:3000
 ## Devnet setup
 1. `npm install` (also regenerates `package-lock.json`)
 2. Create a treasury wallet (`solana-keygen new`) and fund it with devnet SOL (https://faucet.solana.com, pick *devnet*). **There is no token to create: $AFKMINE exists only in the database.**
-3. Put `TREASURY_SECRET_KEY` (and optionally `ADMIN_KEY`) into Render → Environment, plus a Render Postgres → `DATABASE_URL`.
+3. Put `TREASURY_SECRET_KEY` (and `ADMIN_TOKEN`) into Render → Environment, plus a Render Postgres → `DATABASE_URL`.
 4. In Phantom switch to *Developer Settings → Testnet Mode → Solana Devnet* and use a wallet with devnet SOL.
 
 ## Fixing "server sleeps when nobody plays"
@@ -61,12 +64,15 @@ server, so also add a free external pinger (UptimeRobot / cron-job.org) hitting
 - **Offline earnings** now include $AFKMINE, items, crates and shards (cash/loot at 50%); the Welcome-back popup lists everything.
 - **Daily reward**: 7-day streak calendar, days 1-6 give coins/items/crates, day 7 gives $AFKMINE. Missing a day restarts the week. Reset at 00:00 UTC.
 - **Quests**: 4 daily quests (+ perfect-day bonus) and 8 seasonal quests (30 days). Rewards are coins, crates, boosts or $AFKMINE.
-- **Referrals**: `?ref=CODE` link; the referrer gets 25% (`REF_RATE`) of every pack the referred player buys, paid as $AFKMINE. Referral leaderboard in Ranks → Referrals.
+- **Referrals**: `?ref=CODE` link. Tiers by *qualifying* referrals (distinct friends who bought at least one pack): T1 20%, T2 25% (3+), T3 30% + 5% of shop spending (10+). Rewards are recorded in lamports at purchase time as **pending** and paid **by hand once a week** in the admin dashboard. Nothing is credited automatically.
+- **Nametags** (cosmetic): golden **OG** (Season 0 accounts), silver T2 and premium T3 on both leaderboards.
+- **Power gating**: floor 4+ only work when the Manager's total Power reaches the floor's requirement (floors 1-3 are free). Gated floors show what they need.
+- **Trade chart**: 5-minute candles with 24H / 3D / 7D / 30D / ALL ranges.
 - **Durability**: gear at 0% is unusable (no stats, can't be equipped); anything above 0% works at full strength.
 - The "24 h without withdrawing" quest is already complete for new players until their first withdrawal.
 - Events tab: placeholder ("coming soon").
 - See `GAME_DESIGN.md` for the full description meant to be given to an AI assistant.
-- Withdrawals (SOL): 20% fee, 0.01-5 SOL per withdrawal (gross), 24 h cooldown, guests cannot withdraw.
+- Withdrawals (SOL): 0.05-2 SOL (gross), 20% fee, 24 h cooldown, guests cannot withdraw. A request locks the funds as **pending**; nothing is sent until an admin approves it in `/admin`.
 - Settings: sound/music, change username, log out, reset progress, delete account (accounts holding SOL or $AFKMINE can't be deleted).
 - Bank: Deposit / Withdraw (SOL only) / Trade ($AFKMINE <-> SOL in a virtual x*y=k pool) / History. Packs are paid from the in-game SOL balance or with $AFKMINE.
 
@@ -79,3 +85,8 @@ server, so also add a free external pinger (UptimeRobot / cron-job.org) hitting
 ## Honest limits
 - Real Solana RPC paths, Postgres and a real wallet on testnet were **not** exercised in the automated tests (a fake chain was used). Test with small amounts on testnet first.
 - Before going to mainnet: independent security audit, rotate the treasury key, keep only a small hot balance in the treasury.
+
+## Admin dashboard (`/admin`)
+Set `ADMIN_TOKEN` (16+ random characters) and open `/admin`. Pages: Overview (solvency, flows, referral cost), Withdrawals (approve / reject with reason / retry / refund), Referrals (weekly batch), Players (search, flags, OG exclusion), Trades, Audit log. Sign-in is rate limited, sessions expire after 30 min idle (8 h max) and are lost on restart. Every decision is written to an append-only audit log.
+
+**Privacy**: the risk flags use salted HMAC hashes of IP addresses (16 hex chars, last 5 per player, deleted after 30 days and with the account). Raw IPs and browser fingerprints are never stored. Mention this in your privacy policy.

@@ -55,12 +55,17 @@ function renderGameVisuals(mine) {
 }
 // slow refresh (4x/sec): labels, costs, miner counts
 function refreshFloors(mine) {
+  GATE = S.gateInfo(state, Date.now());                             // which floors reach their Power requirement
+  renderGate();
   for (let i = 0; i < mine.unlockedShaftCount; i++) {
     const f = floorUI[i], sh = mine.shafts[i];
     if (!f) continue;
     syncMiners(i, mine);
     setText(f.lv, "Lv " + sh.level);
-    setText(f.inc, formatMoney(floorUnitRate(i, mine) * unitValue(i, mine) * 60) + "/min");
+    const on = !GATE || GATE.active[i] !== false;
+    f.row.classList.toggle("gated", !on);
+    setText(f.inc, on ? formatMoney(floorUnitRate(i, mine) * unitValue(i, mine) * 60) + "/min" : "💤 idle");
+    setText(f.need, on ? "" : "Needs " + fmtN(S.floorReq(i + 1)) + " Power, you have " + fmtN(GATE.power));
     const c1 = upgradeCost(18 * Math.pow(2.3, i), sh.level, 1, costMult());
     setText(f.cost, formatMoney(c1));
     f.btn.classList.toggle("poor", state.cash < c1);
@@ -75,7 +80,7 @@ function refreshFloors(mine) {
 function updateHeroVisuals(mine) {
   let U = 0, V = 0;
   const n = mine.unlockedShaftCount;
-  for (let i = 0; i < n; i++) { const u = floorUnitRate(i, mine); U += u; V += u * unitValue(i, mine); }
+  for (let i = 0; i < n; i++) { if (GATE && GATE.active[i] === false) continue; const u = floorUnitRate(i, mine); U += u; V += u * unitValue(i, mine); }
   const avg = U ? V / U : 0;
   const cycle = (2 * n) / ((1.4 + 0.15 * mine.elevator.level) * elevatorBuff()) + n * elevatorStop(mine);
   const vals = [V * 60, (elevatorCapacity(mine.elevator.level) / cycle) * avg * 60,
@@ -89,6 +94,7 @@ function updateHeroVisuals(mine) {
       setText(row.querySelector("em"), formatMoney(vals[k]));
     });
     const weak = lo < mx * 0.98;
+    setText($("tput-gate"), gateText());
     setText($("tput-note"), weak ? "Limited by the " + ["mines", "elevator", "warehouse"][limiting] + " — upgrade it to earn more." : "Everything keeps up with the mines. Nice!");
   }
   if (typeof upSel !== "undefined" && upSel) fillUpPopup();

@@ -2,7 +2,8 @@
 // Bank → Trade tab: swap SOL <-> $AFKMINE in the game's VIRTUAL constant-product pool (x*y = k).
 // The numbers shown here come from Shared.quote — the very same function the server uses to settle the trade. The server recomputes everything
 // from its own pool state and ignores the price shown here; the "minimum received" (slippage) we send is only a protection for the player.
-const TRADE = { side: "buy", slip: 1, pool: null, busy: false, err: "" };
+const TRADE = { side: "buy", slip: 1, range: "24h", pool: null, busy: false, err: "" };
+const RANGES = [["24h", "24H"], ["3d", "3D"], ["7d", "7D"], ["30d", "30D"], ["all", "ALL"]];
 const tradeVisible = () => !!$("tr-root") && !!$("panel-bank") && !$("panel-bank").classList.contains("hidden") && BANK_STATE.tab === "trade";
 const tradeDec = () => (TRADE.side === "buy" ? 9 : 6);
 const big = (x) => BigInt(String(x));
@@ -12,6 +13,7 @@ function tradeHTML() {
     <div class="inv-card tr-head">
       <div class="tr-pricebox"><small>$AFKMINE PRICE</small><b id="tr-price">…</b><span class="tr-chg" id="tr-chg"></span></div>
       <div class="tr-chart" id="tr-chart"></div>
+      <div class="tr-ranges">${RANGES.map(([k, n]) => `<button type="button" class="tr-rg" data-range="${k}">${n}</button>`).join("")}</div>
       <div class="tr-stats">
         <div><small>POOL SOL</small><b id="tr-sol">…</b></div><div><small>POOL $AFKMINE</small><b id="tr-tok">…</b></div>
         <div><small>CIRCULATING</small><b id="tr-circ">…</b></div><div><small>FEE</small><b id="tr-fee">…</b></div>
@@ -35,23 +37,25 @@ function tradeHTML() {
 }
 function tradeOpened() { loadPool(); tradeUpdate(); }
 async function loadPool() {
-  try { TRADE.pool = await api("GET", "pool"); TRADE.err = ""; } catch (e) { TRADE.err = e.message; }
+  try { TRADE.pool = await api("GET", "pool?range=" + TRADE.range); TRADE.err = ""; } catch (e) { TRADE.err = e.message; }
   if (tradeVisible()) tradeUpdate();
 }
-// stepped price line (the price only changes when somebody trades), inline SVG
-function tradeChart(h, now) {
-  const W = 300, H = 90, P = 6;
-  if (!h || !h.length) return "";
-  let pts = h.slice(); if (pts.length === 1) pts = [[pts[0][0] - 36e5, pts[0][1]], pts[0]];
-  pts.push([Math.max(now, pts[pts.length - 1][0] + 1), pts[pts.length - 1][1]]);
-  const t0 = pts[0][0], t1 = pts[pts.length - 1][0], lo = Math.min(...pts.map((p) => p[1])), hi = Math.max(...pts.map((p) => p[1]));
-  const flat = hi === lo, span = flat ? hi || 1e-9 : hi - lo;
-  const X = (t) => (P + ((t - t0) / (t1 - t0 || 1)) * (W - 2 * P)).toFixed(1), Y = (v) => (H - P - (flat ? 0.5 : (v - lo) / span) * (H - 2 * P)).toFixed(1);
-  let d = "M" + X(pts[0][0]) + "," + Y(pts[0][1]);
-  for (let i = 1; i < pts.length; i++) d += " H" + X(pts[i][0]) + " V" + Y(pts[i][1]);
-  const up = pts[pts.length - 1][1] >= pts[0][1];
-  return `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="Price history"><path class="tr-area ${up ? "up" : "dn"}" d="${d} V${H - P} H${X(t0)} Z"/><path class="tr-line ${up ? "up" : "dn"}" d="${d}"/></svg>
-    <span class="tr-hi">${fmtPrice(hi)}</span><span class="tr-lo">${fmtPrice(lo)}</span>`;
+// candlestick chart (inline SVG, no scripts): points are [time, open, high, low, close, volume] from GET /api/pool?range=
+function tradeChart(ch, now) {
+  const W = 300, H = 100, P = 5;
+  const pts = ch && ch.points ? ch.points : [];
+  if (!pts.length) return "";
+  const lo = Math.min(...pts.map((p) => p[3])), hi = Math.max(...pts.map((p) => p[2])), flat = hi === lo, span = flat ? hi || 1e-9 : hi - lo;
+  const Y = (v) => (H - P - (flat ? 0.5 : (v - lo) / span) * (H - 2 * P)).toFixed(1);
+  const n = pts.length, step = (W - 2 * P) / Math.max(n, 1), bw = Math.max(0.6, Math.min(6, step * 0.7));
+  let out = "";
+  pts.forEach((p, i) => {
+    const x = (P + step * (i + 0.5)).toFixed(1), up = p[4] >= p[1], y1 = +Y(Math.max(p[1], p[4])), y2 = +Y(Math.min(p[1], p[4]));
+    out += `<line class="tr-wick ${up ? "up" : "dn"}" x1="${x}" x2="${x}" y1="${Y(p[2])}" y2="${Y(p[3])}"/><rect class="tr-body ${up ? "up" : "dn"}" x="${(x - bw / 2).toFixed(1)}" y="${y1}" width="${bw.toFixed(1)}" height="${Math.max(0.8, y2 - y1).toFixed(1)}"/>`;
+  });
+  const t0 = new Date(pts[0][0]), fmt = (d) => (ch.range === "24h" ? d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : d.toLocaleDateString([], { month: "short", day: "numeric" }));
+  return `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="Price chart">${out}</svg>
+    <span class="tr-hi">${fmtPrice(hi)}</span><span class="tr-lo">${fmtPrice(lo)}</span><span class="tr-t0">${fmt(t0)}</span><span class="tr-t1">${fmt(new Date(now))}</span>`;
 }
 function tradeUpdate() {
   if (!tradeVisible()) return;
@@ -67,7 +71,8 @@ function tradeUpdate() {
   const c = $("tr-chg"); setText(c, (P.change24h >= 0 ? "▲ +" : "▼ ") + P.change24h.toFixed(2) + "% 24h"); c.className = "tr-chg " + (P.change24h >= 0 ? "up" : "dn");
   setText($("tr-sol"), "◎ " + fmtLam(+P.solReserve)); setText($("tr-tok"), "◈ " + formatToken(+P.tokenReserve / 1e6));
   setText($("tr-circ"), "◈ " + formatToken(P.circulating)); setText($("tr-fee"), (P.feeBps / 100).toFixed(2).replace(/\.?0+$/, "") + "%");
-  const chart = tradeChart(P.history, P.now); if ($("tr-chart")._h !== chart) { $("tr-chart").innerHTML = chart; $("tr-chart")._h = chart; }
+  document.querySelectorAll(".tr-rg").forEach((b) => b.classList.toggle("on", b.dataset.range === TRADE.range));
+  const chart = tradeChart(P.chart, P.now); if ($("tr-chart")._h !== chart) { $("tr-chart").innerHTML = chart; $("tr-chart")._h = chart; }
   setText($("tr-note"), "A virtual pool that lives only in the game's database: prices follow x·y = k, buyers move the price up and sellers move it down. " +
     "Game rewards are " + (P.emissionMode === "mint" ? "newly created" : "paid from a limited reserve") + "; $AFKMINE spent in the game is " + (P.sinkMode === "burn" ? "burned" : "returned to the pool") + ".");
   const trades = P.trades.length ? P.trades.slice(0, 12).map((t) => `<div class="tr-row ${t.side}"><span>${new Date(t.t).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} · ${t.side === "buy" ? "BUY" : "SELL"} · ${esc(t.name)}</span><b>${formatToken(t.micro / 1e6)} ◈ <small class="dim">for ${fmtLam(t.lamports)} ◎</small></b></div>`).join("") : `<p class="dim small">No trades yet.</p>`;
@@ -99,12 +104,12 @@ function tradeQuoteUpdate() {
         <div class="st-row"><span>Price impact</span><b class="${r.impactBps > 500 ? "bad" : ""}">${(r.impactBps / 100).toFixed(2)}%</b></div>
         <div class="st-row"><span>Fee (${(P.feeBps / 100).toFixed(2).replace(/\.?0+$/, "")}%, stays in the pool)</span><b>${feeTxt}</b></div>
         <div class="st-row"><span>Minimum received (${TRADE.slip}% slippage)</span><b>${minTxt}</b></div>
-        <div class="st-row"><span>Price after the trade</span><b>◎ ${fmtPrice(r.priceAfter)}</b></div>`;
+        <div class="st-row"><span>Price after the trade</span><b>◎ ${fmtPrice(r.priceAfter)}</b></div>${buy ? "" : `<div class="st-row"><span>Max you can sell right now</span><b class="tokc">◈ ${formatToken((st.maxSellMicro || 0) / 1e6)}</b></div>`}`;
       const left = Math.max(0, (st.cooldownLeft || 0) - (performance.now() - (net.viewAt || 0)));
       if (buy && amount > state.sol) w = "Not enough SOL in your balance — deposit in the Deposit tab.";
       else if (!buy && amount > Math.floor(state.token * 1e6 + 1e-6)) w = "Not enough $AFKMINE.";
       else if (BigInt(amount) * 10000n > (buy ? sol : tok) * pctBps) w = "Too large: at most " + P.limits.maxTradePct + "% of the pool per trade.";
-      else if (!buy && P.sellFloor === "backed" && r.newSol < big(P.initSol)) w = "The pool can only pay out SOL that buyers put in. Try a smaller amount.";
+      else if (!buy && st.sellRoom !== undefined && Number(r.out) > st.sellRoom) w = "Pool liquidity limit reached, try a smaller amount.";
       else if (!buy && (st.soldToday || 0) + Number(r.out) > P.limits.dailySellCapLamports) w = "Daily sell limit reached (resets at 00:00 UTC).";
       else if (left > 0) w = "Cooldown: wait " + Math.ceil(left / 1000) + " s.";
       else ok = true;
@@ -134,12 +139,15 @@ function tradeConfirm() {
 function tradeClick(e) {
   const side = e.target.closest("[data-tside]"), sl = e.target.closest("[data-slip]");
   if (side) { TRADE.side = side.dataset.tside; $("tr-amt").value = ""; return tradeUpdate(); }
+  const rg = e.target.closest("[data-range]");
+  if (rg) { TRADE.range = rg.dataset.range; return loadPool(); }
   if (sl) { TRADE.slip = +sl.dataset.slip; return tradeUpdate(); }
   if (e.target.closest("[data-tmax]")) {
     const P = TRADE.pool; if (!P) return;
+    const st0 = state.trade || {};
     const pctBps = BigInt(Math.round(P.limits.maxTradePct * 100)), buy = TRADE.side === "buy";
     const cap = Number(((buy ? big(P.solReserve) : big(P.tokenReserve)) * pctBps) / 10000n), have = buy ? state.sol : Math.floor(state.token * 1e6 + 1e-6);
-    const v = Math.max(0, Math.min(cap, have));
+    const v = Math.max(0, Math.min(cap, have, buy || st0.maxSellMicro === undefined ? Infinity : st0.maxSellMicro));
     $("tr-amt").value = v > 0 ? unitsText(v, tradeDec()) : "";
     return tradeQuoteUpdate();
   }

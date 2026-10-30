@@ -13,9 +13,10 @@ async function openStore({ file, databaseUrl, ssl }) {
   return databaseUrl ? openPg(databaseUrl, ssl) : openFile(file);
 }
 
+const CANDLES_KEEP = 105000;   // 5-minute candles: about a year
 // ---------------------------------------------------------------------------------------------
 async function openFile(file) {
-  let data = { meta: {}, players: {}, sigs: {}, trades: [], ledger: [] };
+  let data = { meta: {}, players: {}, sigs: {}, trades: [], ledger: [], candles: {} };
   try { data = { ...data, ...JSON.parse(fs.readFileSync(file, "utf8")) }; } catch { /* first run */ }
   let chain = Promise.resolve();
   const write = () => {
@@ -37,11 +38,17 @@ async function openFile(file) {
       if (meta) data.meta = meta;
       if (extra && extra.trades && extra.trades.length) data.trades = data.trades.concat(extra.trades).slice(-20000);
       if (extra && extra.ledger && extra.ledger.length) data.ledger = data.ledger.concat(extra.ledger).slice(-50000);
+      if (extra && extra.candles && extra.candles.length) {
+        for (const c of extra.candles) data.candles[c.t] = c;
+        const ks = Object.keys(data.candles); if (ks.length > CANDLES_KEEP) ks.map(Number).sort((a, b) => a - b).slice(0, ks.length - CANDLES_KEEP).forEach((k) => delete data.candles[k]);
+      }
       await write();
       return true;
     },
     trades: async (n = 50) => data.trades.slice(-n).reverse(),
     ledger: async (n = 100) => data.ledger.slice(-n).reverse(),
+    candles: async () => Object.values(data.candles).sort((a, b) => a.t - b.t),
+    allLedger: async () => data.ledger.slice(),
     removePlayers: async (ids) => { ids.forEach((id) => delete data.players[id]); return write(); },
     hasSig: async (sig) => !!data.sigs[sig],
     close: async () => { await chain; },
@@ -57,6 +64,7 @@ async function openPg(url, ssl) {
   await pool.query(`CREATE TABLE IF NOT EXISTS meta (k text PRIMARY KEY, v jsonb NOT NULL)`);
   await pool.query(`CREATE TABLE IF NOT EXISTS sigs (sig text PRIMARY KEY, data jsonb, at timestamptz NOT NULL DEFAULT now())`);
   await pool.query(`CREATE TABLE IF NOT EXISTS trades (id bigserial PRIMARY KEY, pid text, data jsonb NOT NULL, at timestamptz NOT NULL DEFAULT now())`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS candles (t bigint PRIMARY KEY, data jsonb NOT NULL)`);
   await pool.query(`CREATE TABLE IF NOT EXISTS ledger (id bigserial PRIMARY KEY, kind text, data jsonb NOT NULL, at timestamptz NOT NULL DEFAULT now())`);
   return {
     kind: "postgres",
@@ -87,12 +95,15 @@ async function openPg(url, ssl) {
         if (meta) await c.query("INSERT INTO meta (k, v) VALUES ('main', $1::jsonb) ON CONFLICT (k) DO UPDATE SET v = EXCLUDED.v", [JSON.stringify(meta)]);
         if (extra && extra.trades && extra.trades.length) await c.query("INSERT INTO trades (pid, data) SELECT * FROM unnest($1::text[], $2::jsonb[])", [extra.trades.map((t) => t.pid), extra.trades.map((t) => JSON.stringify(t))]);
         if (extra && extra.ledger && extra.ledger.length) await c.query("INSERT INTO ledger (kind, data) SELECT * FROM unnest($1::text[], $2::jsonb[])", [extra.ledger.map((t) => t.kind), extra.ledger.map((t) => JSON.stringify(t))]);
+        if (extra && extra.candles && extra.candles.length) await c.query("INSERT INTO candles (t, data) SELECT * FROM unnest($1::bigint[], $2::jsonb[]) ON CONFLICT (t) DO UPDATE SET data = EXCLUDED.data", [extra.candles.map((x) => x.t), extra.candles.map((x) => JSON.stringify(x))]);
         await c.query("COMMIT");
         return true;
       } catch (e) { await c.query("ROLLBACK").catch(() => {}); throw e; } finally { c.release(); }
     },
     trades: async (n = 50) => (await pool.query("SELECT data FROM trades ORDER BY id DESC LIMIT $1", [n])).rows.map((r) => r.data),
     ledger: async (n = 100) => (await pool.query("SELECT data FROM ledger ORDER BY id DESC LIMIT $1", [n])).rows.map((r) => r.data),
+    candles: async () => (await pool.query("SELECT data FROM candles ORDER BY t ASC LIMIT $1", [CANDLES_KEEP])).rows.map((r) => r.data),
+    allLedger: async () => (await pool.query("SELECT data FROM ledger ORDER BY id ASC")).rows.map((r) => r.data),
     removePlayers: async (ids) => { if (ids.length) await pool.query("DELETE FROM players WHERE id = ANY($1::text[])", [ids]); },
     hasSig: async (sig) => (await pool.query("SELECT 1 FROM sigs WHERE sig = $1", [sig])).rowCount === 1,
     close: async () => { await pool.end(); },

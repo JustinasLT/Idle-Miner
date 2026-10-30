@@ -45,9 +45,10 @@ function createBank(game, chain) {
   function bankView(p) {
     const t = game.now();
     const withdrawals = Object.values(db.withdrawals).filter((w) => w.pid === p.id).sort((a, b) => b.created - a.created).slice(0, 15)
-      .map((w) => ({ id: w.id, unit: w.unit === "lamports" ? "sol" : "afkmine", amount: w.amount, fee: w.fee, net: w.net == null ? w.amount : w.net, state: w.state, sig: w.sig || null, created: w.created, error: w.error || null }));
+      .map((w) => ({ id: w.id, unit: w.unit === "lamports" ? "sol" : "afkmine", amount: w.amount, fee: w.fee, net: w.net == null ? w.amount : w.net, state: w.state, status: w.unit === "lamports" ? statusOf(w) : w.state, reason: w.reason || null, sig: w.sig || null, created: w.created, error: w.state === "failed" ? "The transfer failed — an admin will retry it or refund you" : null }));
+    const lockedAmount = Object.values(db.withdrawals).filter((w) => w.pid === p.id && w.unit === "lamports" && (w.state === "pending" || w.state === "failed")).reduce((a, w) => a + w.amount, 0);
     return {
-      wallet: p.wallet, balance: p.balance, solBalance: p.solBalance, canWithdraw: !!p.wallet && game.isPaid(p),
+      wallet: p.wallet, balance: p.balance, solBalance: p.solBalance, lockedSol: lockedAmount, canWithdraw: !!p.wallet && game.isPaid(p),
       cooldownLeft: Math.max(0, (p.lastWithdrawAt || 0) + SOL.withdrawCooldownMs - t),
       deposits: p.history.filter((h) => h.type === "deposit" && h.lamports).slice(0, 15), withdrawals,
     };
@@ -89,6 +90,8 @@ function createBank(game, chain) {
   // ---- withdrawals (SOL) -------------------------------------------------------------------------------------------
   // The player asks for `gross` lamports to leave the SOL balance. SOL.withdrawFeeBps (20 %) of it stays with the game,
   // the rest is sent to the player's own wallet. Min/max per request in config, one request per 24 h.
+  // A withdrawal request only LOCKS the money and creates a record (state "pending"). Nothing is sent until the admin approves it.
+  // States: pending -> (approve) queued -> signed -> sent -> done | (reject) rejected | send failed -> failed (funds stay locked until retry or refund)
   function requestWithdraw(p, amount) {
     return locked(p, async () => {
       needChain(); needWallet(p);
@@ -96,43 +99,99 @@ function createBank(game, chain) {
       const gross = lamports(amount), t = game.now();
       if (gross < SOL.minWithdrawLamports) bad("Minimum withdrawal is " + solText(SOL.minWithdrawLamports) + " SOL");
       if (gross > SOL.maxWithdrawLamports) bad("Maximum per withdrawal is " + solText(SOL.maxWithdrawLamports) + " SOL");
+      if (Object.values(db.withdrawals).some((w) => w.pid === p.id && w.unit === "lamports" && (w.state === "pending" || w.state === "failed"))) bad("You already have a withdrawal waiting for approval");
       const left = (p.lastWithdrawAt || 0) + SOL.withdrawCooldownMs - t;
       if (left > 0) bad("Withdrawals have a 24 hour cooldown — next one in " + Math.floor(left / 3600e3) + "h " + String(Math.ceil((left % 3600e3) / 60e3)).padStart(2, "0") + "m", 429);
       game.touchPlayer(p);
       if (p.solBalance < gross) bad("Not enough SOL in your balance");
       const fee = Math.ceil((gross * SOL.withdrawFeeBps) / 10000), net = gross - fee;     // fee rounded up: rounding favours the house
       if (net < 1) bad("Amount is too small");
-      const onchain = await chain.treasuryBalance();    // the real wallet must hold this, every withdrawal still in flight, and a fee reserve
-      const inFlight = Object.values(db.withdrawals).filter((w) => w.unit === "lamports" && (w.state === "queued" || w.state === "signed" || w.state === "sent")).reduce((a, w) => a + w.net, 0);
-      if (onchain < BigInt(net + inFlight + C.TREASURY_RESERVE_LAMPORTS)) bad("The game treasury is temporarily out of SOL — try a smaller amount later", 503);
       // --- everything below is synchronous: no other request can interleave ---
-      if (p.solBalance < gross) bad("Not enough SOL in your balance");
-      if ((p.lastWithdrawAt || 0) + SOL.withdrawCooldownMs - game.now() > 0) bad("Withdrawals have a 24 hour cooldown", 429);
-      const sv = game.solvency();
-      if (sv.assets < net) bad("The game treasury ledger cannot cover this withdrawal — try a smaller amount later", 503);
       const prevAt = p.lastWithdrawAt || 0;
       p.lastWithdrawAt = t;
-      const w = { id: crypto.randomBytes(8).toString("hex"), pid: p.id, wallet: p.wallet, unit: "lamports", amount: gross, fee, net, base: String(net), state: "queued", created: t, prevAt, tries: 0 };
+      const w = { id: crypto.randomBytes(8).toString("hex"), pid: p.id, wallet: p.wallet, unit: "lamports", amount: gross, fee, net, base: String(net), state: "pending", created: t, prevAt, tries: 0 };
       db.withdrawals[w.id] = w;
-      game.debitWithdraw(p, w);
+      game.lockWithdraw(p, w);
       game.touch(p); game.touchMeta();
-      await game.saveNow([p]);           // durable BEFORE any chain activity
-      kick();
-      return { withdrawalId: w.id, amount: gross, fee, net, state: w.state };
+      await game.saveNow([p]);
+      return { withdrawalId: w.id, amount: gross, fee, net, state: w.state, status: statusOf(w) };
     });
   }
+  const statusOf = (w) => ({ pending: "pending", queued: "approved", signed: "approved", sent: "sent", done: "sent", rejected: "rejected", failed: "failed" }[w.state] || w.state);
+  const getW = (id) => { const w = db.withdrawals[String(id)]; if (!w || w.unit !== "lamports") bad("Unknown withdrawal", 404); return w; };
+  const audit = (admin, action, w, extra) => game.audit && game.audit(admin, action, { withdrawal: w.id, player: w.pid, amount: w.amount, ...extra });
+  const giveBackCooldown = (w) => { const p = db.players[w.pid]; if (p && p.lastWithdrawAt === w.created) { p.lastWithdrawAt = w.prevAt || 0; game.touch(p); } };
 
+  // ---- admin decisions (called by the admin routes; the HTTP layer authenticates, rate limits and audits) ----
+  // approve: compare-and-set on the state, entirely synchronous after the on-chain balance check => approving twice can never send twice
+  async function adminApprove(id, admin) {
+    const w0 = getW(id);
+    if (w0.state !== "pending") bad("This withdrawal is already " + statusOf(w0), 409);
+    needChain();
+    const onchain = await chain.treasuryBalance();      // the real wallet must hold this, every transfer in flight, and a fee reserve
+    const w = getW(id);
+    if (w.state !== "pending") bad("This withdrawal is already " + statusOf(w), 409);     // re-check after the await
+    const inFlight = Object.values(db.withdrawals).filter((x) => x.unit === "lamports" && (x.state === "queued" || x.state === "signed" || x.state === "sent")).reduce((a, x) => a + x.net, 0);
+    if (onchain < BigInt(w.net + inFlight + C.TREASURY_RESERVE_LAMPORTS)) bad("The treasury wallet does not hold enough SOL to send this", 503);
+    w.state = "queued"; w.approvedAt = game.now(); w.approvedBy = String(admin || "admin").slice(0, 40); w.tries = 0; w.error = null;
+    game.bookWithdraw(w);
+    audit(admin, "withdrawal.approve", w);
+    await game.saveNow([db.players[w.pid]].filter(Boolean));
+    kick();
+    return { id: w.id, status: statusOf(w) };
+  }
+  async function adminReject(id, reason, admin) {
+    const w = getW(id), why = String(reason || "").trim().slice(0, 200);
+    if (!why) bad("A reason is required");
+    if (w.state !== "pending") bad("This withdrawal is already " + statusOf(w), 409);
+    w.state = "rejected"; w.reason = why; w.rejectedAt = game.now(); w.rejectedBy = String(admin || "admin").slice(0, 40);
+    game.releaseWithdraw(w, "Rejected: " + why); giveBackCooldown(w);
+    audit(admin, "withdrawal.reject", w, { reason: why });
+    await game.saveNow([db.players[w.pid]].filter(Boolean));
+    return { id: w.id, status: statusOf(w) };
+  }
+  // a failed send (never reached the chain, failed on-chain, or the blockhash expired => provably not paid): admin picks retry or refund
+  async function adminRetry(id, admin) {
+    const w = getW(id);
+    if (w.state !== "failed") bad("Only a failed withdrawal can be retried", 409);
+    w.state = "queued"; w.tries = 0; w.error = null; w.retriedAt = game.now(); delete w.sig; delete w.raw; delete w.lastValid;
+    game.bookWithdraw(w);
+    audit(admin, "withdrawal.retry", w);
+    await game.saveNow([db.players[w.pid]].filter(Boolean));
+    kick();
+    return { id: w.id, status: statusOf(w) };
+  }
+  async function adminRefund(id, reason, admin) {
+    const w = getW(id), why = String(reason || "Refunded after a failed send").trim().slice(0, 200);
+    if (w.state !== "failed") bad("Only a failed withdrawal can be refunded", 409);
+    w.state = "rejected"; w.reason = why; w.rejectedAt = game.now(); w.rejectedBy = String(admin || "admin").slice(0, 40);
+    game.releaseWithdraw(w, why); giveBackCooldown(w);
+    audit(admin, "withdrawal.refund", w, { reason: why });
+    await game.saveNow([db.players[w.pid]].filter(Boolean));
+    return { id: w.id, status: statusOf(w) };
+  }
+
+  // old token withdrawals only (auto refund as $AFKMINE)
   function refund(w, reason) {
     if (w.state === "done" || w.state === "failed") return;
     w.state = "failed"; w.error = String(reason).slice(0, 200);
-    game.refundWithdraw(w, reason);       // SOL (or, for old token withdrawals, $AFKMINE) goes back to the balance, the ledger is reversed
+    game.refundWithdraw(w, reason);
     const p = db.players[w.pid];
     if (p) {
-      if (p.lastWithdrawAt === w.created) p.lastWithdrawAt = w.prevAt || 0; // a failed withdrawal does not use up the 24 h cooldown
+      if (p.lastWithdrawAt === w.created) p.lastWithdrawAt = w.prevAt || 0;
       game.touch(p);
     }
     game.touchMeta();
   }
+  // a SOL transfer that did not go through: the ledger outflow is reversed, the funds stay LOCKED, the admin chooses retry or refund
+  function failSend(w, reason) {
+    if (w.state === "failed" || w.state === "done") return;
+    w.state = "failed"; w.error = String(reason).slice(0, 200); w.failedAt = game.now();
+    game.unbookWithdraw(w);
+    game.audit && game.audit("system", "withdrawal.failed", { withdrawal: w.id, player: w.pid, reason: w.error });
+    game.touchMeta();
+  }
+  const dropSend = (w, reason) => (w.unit === "lamports" && !w.legacy ? failSend(w, reason) : refund(w, reason));
   let run = null, again = false;
   async function step(w) {
     if (w.state === "queued") {
@@ -144,15 +203,15 @@ function createBank(game, chain) {
         game.touchMeta(); await game.saveNow([]);     // signature stored durably BEFORE broadcast
       } catch (e) {
         w.tries = (w.tries || 0) + 1; w.error = String(e.message).slice(0, 200);
-        if (w.tries >= 6) { refund(w, "Could not prepare the transfer: " + w.error); await game.saveNow(db.players[w.pid] ? [db.players[w.pid]] : []); }
+        if (w.tries >= 6) { dropSend(w, "Could not prepare the transfer: " + w.error); await game.saveNow(db.players[w.pid] ? [db.players[w.pid]] : []); }
         return;
       }
     }
     if (w.state === "signed" || w.state === "sent") {
       const st = await chain.withdrawalStatus(w.sig, w.lastValid);
       if (st === "confirmed") { w.state = "done"; w.doneAt = game.now(); delete w.raw; game.touchMeta(); await game.saveNow([]); return; }
-      if (st === "failed") { refund(w, "The transaction failed on-chain"); await game.saveNow([db.players[w.pid]].filter(Boolean)); return; }
-      if (st === "expired") { refund(w, "The transaction expired before it was confirmed"); await game.saveNow([db.players[w.pid]].filter(Boolean)); return; }
+      if (st === "failed") { dropSend(w, "The transaction failed on-chain"); await game.saveNow([db.players[w.pid]].filter(Boolean)); return; }
+      if (st === "expired") { dropSend(w, "The transaction expired before it was confirmed"); await game.saveNow([db.players[w.pid]].filter(Boolean)); return; }
       // still pending: (re)broadcast the very same signed transaction (idempotent)
       if (w.state === "signed" || game.now() - (w.sentAt || 0) > 20e3) {
         try { await chain.broadcast(w.raw); w.state = "sent"; w.sentAt = game.now(); w.error = null; }
@@ -241,7 +300,7 @@ function createBank(game, chain) {
     });
   }
 
-  return { publicConfig, bankView, prepareDeposit, confirmDeposit, requestWithdraw, buyPackWithMine, buyPackWithSol, confirmPackOrder, processWithdrawals, kick };
+  return { publicConfig, bankView, prepareDeposit, confirmDeposit, requestWithdraw, adminApprove, adminReject, adminRetry, adminRefund, statusOf, buyPackWithMine, buyPackWithSol, confirmPackOrder, processWithdrawals, kick };
 }
 
 module.exports = { createBank };

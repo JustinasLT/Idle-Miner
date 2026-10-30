@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="robots" content="noindex,nofollow" />
+<title>Idle Miner · Admin</title>
+<link rel="stylesheet" href="css/admin.css" />
+</head>
+<body>
+<div id="login" class="login" hidden>
+  <form id="login-form" class="card">
+    <h1>⛏️ Admin</h1>
+    <p class="dim">Sign in with the server's ADMIN_TOKEN. This area is separate from player accounts.</p>
+    <input id="token" type="password" autocomplete="off" placeholder="Admin token" />
+    <button type="submit" class="btn pri">Sign in</button>
+    <p id="login-err" class="bad"></p>
+  </form>
+</div>
+<div id="app" hidden>
+  <header>
+    <b>⛏️ Idle Miner · Admin</b>
+    <nav id="nav"></nav>
+    <span id="cluster" class="pill"></span>
+    <button type="button" id="logout" class="btn">Log out</button>
+  </header>
+  <main id="main"></main>
+</div>
+<div id="toast" class="toast" hidden></div>
+<script src="js/admin.js"></script>
+</body>
+</html>

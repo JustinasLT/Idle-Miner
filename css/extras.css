@@ -168,3 +168,30 @@
 #bk-tabs{display:flex;gap:4px;margin-bottom:8px}
 #bk-tabs button{flex:1;padding:8px 4px;border:0;border-radius:9px;font:inherit;font-weight:900;font-size:.75rem;color:inherit;background:rgba(255,255,255,.07);cursor:pointer}
 #bk-tabs button.on{background:#ff9800;color:#1a1410}
+
+/* ---- power-gated floors ---- */
+.floor.gated{filter:saturate(.35) brightness(.8)}
+.floor.gated .floor-inc{color:#9e9e9e}
+.floor-need{display:none;margin-left:auto;font-size:.62rem;font-weight:900;color:#ffcc80}
+.floor.gated .floor-need{display:inline}
+.gate-pill{position:absolute;left:6px;top:70px;z-index:5;padding:3px 9px;border-radius:999px;font-size:.62rem;font-weight:900;background:rgba(40,20,0,.85);border:1px solid #ff9800;color:#ffcc80;max-width:70%}
+.tput-gate{margin-top:6px;font-size:.62rem;font-weight:800;color:#ffcc80}
+
+/* ---- trade chart: candles + range buttons ---- */
+.tr-wick{stroke-width:1;vector-effect:non-scaling-stroke}
+.tr-wick.up{stroke:#69f0ae}.tr-wick.dn{stroke:#ff8a80}
+.tr-body.up{fill:#69f0ae}.tr-body.dn{fill:#ff8a80}
+.tr-t0,.tr-t1{position:absolute;bottom:2px;font-size:.55rem;opacity:.6;font-weight:800}
+.tr-t0{left:6px}.tr-t1{right:46%;display:none}
+.tr-ranges{display:flex;gap:4px;justify-content:center}
+.tr-rg{padding:3px 10px;border:1px solid rgba(255,255,255,.15);border-radius:8px;background:transparent;color:inherit;font:inherit;font-weight:800;font-size:.68rem;cursor:pointer}
+.tr-rg.on{background:#ff9800;color:#1a1410;border-color:#ff9800}
+
+/* ---- nametags (cosmetic only) ---- */
+.tag{display:inline-block;font:700 10px/1 system-ui,sans-serif;letter-spacing:.06em;padding:2px 5px;margin-right:5px;border-radius:4px;vertical-align:1px;white-space:nowrap}
+.tag.og{color:#3b2800;background:linear-gradient(135deg,#fff2a8,#f5c842 45%,#c98a00);box-shadow:0 0 6px rgba(255,200,60,.55)}
+.tag.ref2{color:#1d2530;background:linear-gradient(135deg,#f4f7fa,#b9c3cf 55%,#8d99a8);box-shadow:0 0 5px rgba(190,205,225,.45)}
+.tag.ref3{color:#fff;background:linear-gradient(120deg,#7c3aed,#db2777 55%,#f59e0b);box-shadow:0 0 8px rgba(219,39,119,.6);animation:tagshine 3s linear infinite;background-size:200% 100%}
+@keyframes tagshine{to{background-position:200% 0}}
+@media (prefers-reduced-motion:reduce){.tag.ref3{animation:none}}
+.ref-tier{margin:8px 0;padding:8px;border-radius:8px;background:rgba(255,255,255,.04)}

@@ -24,11 +24,16 @@ const C = {
   ONBOARD_MINUTES: 90,               // ...which finishes in about 90 minutes of active play
   DEV_MINE_AMOUNT: 10000,            // $AFKMINE given by the test faucet in the shop (see DEV_FAUCET below)
   // --- referrals ---
-  // A referrer gets REF_RATE of what a referred player spends on packs.
-  //   * pack paid from the SOL balance  -> the referrer gets REF_RATE of the price as SOL balance (paid out of that real pack revenue, never minted),
-  //     but only if the buyer's lifetime REAL deposits cover the pack price (stops free-account / alt-account loops).
-  //   * pack paid in $AFKMINE           -> the referrer gets REF_RATE of the tokens spent (taken from what the buyer paid, nothing is minted).
-  REF_RATE: num(env.REF_RATE, 0.25),
+  // Referral tiers [tunable]. A qualifying referral = a distinct referred player with at least one confirmed pack purchase (that purchase counts).
+  // The tier is recomputed at EVERY purchase and applies only to that purchase (never retroactively). Rewards are recorded in lamports at purchase time
+  // ($AFKMINE spend is valued at the pool price of that moment) and accrue as ledger entries; an admin pays them out by hand once a week.
+  REF_TIERS: [
+    { tier: 1, min: 0, packBps: num(env.REF_T1_BPS, 2000), shopBps: 0 },                                              // everyone: 20 % of pack purchases
+    { tier: 2, min: num(env.REF_T2_MIN, 3), packBps: num(env.REF_T2_BPS, 2500), shopBps: 0 },                          // 3+ qualifying referrals: 25 %
+    { tier: 3, min: num(env.REF_T3_MIN, 10), packBps: num(env.REF_T3_BPS, 3000), shopBps: num(env.REF_T3_SHOP_BPS, 500) }, // 10+: 30 % + 5 % of shop spending
+  ],
+  REF_PAYOUT_DOW: num(env.REF_PAYOUT_DOW, 1),   // weekly payout day shown to players (0 = Sunday ... 1 = Monday), 00:00 UTC
+  SEASON0_CUTOFF: env.SEASON0_CUTOFF ? Date.parse(env.SEASON0_CUTOFF) : 0,   // accounts created at or before this moment get the golden OG tag (0 = everybody who exists when this version first starts)
   REF_BOARD_SIZE: 100,               // rows on the referral leaderboard
   // --- $AFKMINE <-> SOL market (VIRTUAL constant-product pool x*y=k that lives only in our database) ---
   POOL_INIT_SOL: num(env.POOL_INIT_SOL, 100),                 // starting SOL reserve (virtual!)
@@ -39,10 +44,10 @@ const C = {
   DAILY_SELL_CAP_LAMPORTS_PER_PLAYER: num(env.DAILY_SELL_CAP_LAMPORTS_PER_PLAYER, 1e9), // SOL one player can receive from selling per UTC day (1 SOL)
   TRADE_NEED_WALLET: env.TRADE_NEED_WALLET !== "0",           // guests cannot trade
   SELL_NEED_PACK: env.SELL_NEED_PACK !== "0",                 // only players who bought a pack can sell $AFKMINE for SOL (blocks free-account farming)
-  // "backed": a sell may only be paid with SOL that buyers put into the pool, so the price can never fall below the starting price and
-  //           trading alone can never create more SOL liabilities than real deposits. "off": the curve may pay out the virtual starting SOL too
-  //           (still limited by the treasury solvency check).
-  POOL_SELL_FLOOR: env.POOL_SELL_FLOOR === "off" ? "off" : "backed",
+  // There is NO price floor: the curve alone sets the price. A sell is only limited by what the treasury can really pay:
+  //   room = treasury assets - every player's SOL balance - locked/pending withdrawals - SELL_KEEP_LAMPORTS
+  SELL_KEEP_LAMPORTS: num(env.SELL_KEEP_LAMPORTS, 0),          // treasury SOL that sells may never touch (protects pack revenue / fees); 0 = sells may use all of the surplus
+  CANDLE_MS: 5 * 60e3, CANDLES_MAX: 105000, CHART_MAX_POINTS: 300,   // price history: 5-minute OHLC candles kept in the store (about a year), downsampled per request
   // What happens to $AFKMINE spent on sinks (packs, boosts, floors, item upgrades...):
   //   "burn": it disappears (circulating supply shrinks).   "recycle": it flows back into the pool's token reserve (pushes the price down).
   // (the shop boosts / floor unlocks themselves always debit the player; this only decides where the tokens go)
@@ -79,8 +84,8 @@ const SOL = {
   merchant: env.MERCHANT_WALLET || "",              // LEGACY: only used to confirm pack orders that were created before the switch to the SOL balance
   mineDiscount: 0.10,                               // paying a pack in $AFKMINE is 10 % cheaper than SOL (priced at the pool's spot price)
   minDepositLamports: solToLamports(num(env.MIN_DEPOSIT_SOL, 0.01)), maxDepositLamports: solToLamports(num(env.MAX_DEPOSIT_SOL, 100)),
-  minWithdrawLamports: solToLamports(num(env.MIN_WITHDRAW_SOL, 0.01)),
-  maxWithdrawLamports: solToLamports(num(env.MAX_WITHDRAW_SOL, 5)),   // per withdrawal (taken from the SOL balance, fee included)
+  minWithdrawLamports: num(env.WITHDRAW_MIN_LAMPORTS, 50e6),          // 0.05 SOL  [tunable] per withdrawal, taken from the SOL balance (fee included)
+  maxWithdrawLamports: num(env.WITHDRAW_MAX_LAMPORTS, 2e9),           // 2 SOL      [tunable]
   withdrawFeeBps: Math.round(num(env.WITHDRAW_FEE, 0.2) * 10000),     // 20 % stays in the treasury, the player receives the rest
   withdrawCooldownMs: 24 * 3600e3,                                    // one withdrawal per account every 24 h
 };

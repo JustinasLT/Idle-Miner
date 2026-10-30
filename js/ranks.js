@@ -19,7 +19,7 @@ async function renderRanks() {
   const D = ranksData, over = D.season.over, mine = D.me || { rank: 0, pts: 0, prize: 0 }, m = miningInfo();
   const info = net.info, claimed = info && info.claimed;
   const medal = (r) => (r === 1 ? "🥇" : r === 2 ? "🥈" : r === 3 ? "🥉" : r);
-  const tr = (r, me) => `<tr class="${me ? "me" : ""}"><td class="rk">${medal(r.rank)}</td><td class="nmc">${me ? "⭐ " : ""}${esc(r.name)}</td><td>${r.level}</td><td>${fmtN(r.power)}</td><td>${r.items}</td><td class="tokc">${formatToken(r.earned)}</td><td class="tokc">${r.prize ? formatToken(r.prize) : "–"}</td><td class="pts">${fmtN(r.pts)}</td></tr>`;
+  const tr = (r, me) => `<tr class="${me ? "me" : ""}"><td class="rk">${medal(r.rank)}</td><td class="nmc">${me ? "⭐ " : ""}${tagHtml(r.tags)}${esc(r.name)}</td><td>${r.level}</td><td>${fmtN(r.power)}</td><td>${r.items}</td><td class="tokc">${formatToken(r.earned)}</td><td class="tokc">${r.prize ? formatToken(r.prize) : "–"}</td><td class="pts">${fmtN(r.pts)}</td></tr>`;
   const myName = info ? info.name : "";
   const inTop = D.me && D.me.rank <= LB_SIZE;
   const claim = over && info && !claimed ? `<button type="button" class="btn-primary claim" data-r="claim">🏆 Claim ${mine.prize ? formatToken(mine.prize) + " $AFKMINE" : "(no prize this season)"}</button>` : over ? `<p class="dim small">Prize claimed ✓</p>` : "";
@@ -39,6 +39,7 @@ async function renderRanks() {
     </tbody></table></div>
     <p class="dim small rank-note">Points = Power + Level×20 + Items×5 + $AFKMINE earned×0.1. Prizes shown are projected from the current rank and can be claimed when the season ends.</p>`;
 }
+const tagHtml = (tags) => (tags || []).map((t) => `<span class="tag ${t}" title="${t === "og" ? "OG: here in Season 0" : t === "ref2" ? "Referral tier 2" : "Referral tier 3"}">${t === "og" ? "OG" : t === "ref2" ? "T2" : "T3"}</span>`).join("");
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 function renameUser() {
   openModal(`<h2>Username</h2><p>Shown on the leaderboard (2–16 letters, numbers, space . _ -).</p><input id="name-in" class="name-in" maxlength="16" value="${esc(state.name)}" />
@@ -60,24 +61,27 @@ async function renderRefTab() {
   catch (e) { el.innerHTML = rankTabs() + `<div class="coming-soon"><span>📡</span><b>Can't reach the game server</b><small>${esc(e.message)}</small><button type="button" class="inv-btn" data-r="retry">Retry</button></div>`; return; }
   if (!ranksOpen() || RANKS.tab !== "ref") return;
   refLinkText = location.origin + "/?ref=" + mine.code;
-  const rate = Math.round(mine.rate * 100), myName = state.name;
-  const row = (r, me) => `<tr class="${me ? "me" : ""}"><td class="rk">${r.rank === 1 ? "🥇" : r.rank === 2 ? "🥈" : r.rank === 3 ? "🥉" : r.rank || "–"}</td><td class="nmc">${me ? "⭐ " : ""}${esc(r.name)}</td><td>${nf(r.referred)}</td><td class="tokc">${r.earnedSol ? "◎ " + fmtLam(r.earnedSol) + (r.earned ? " + " : "") : ""}${r.earned || !r.earnedSol ? "◈ " + formatToken(r.earned) : ""}</td></tr>`;
+  const myName = state.name, pct = (b) => b / 100, nxt = mine.next, payD = mine.nextPayoutAt ? new Date(mine.nextPayoutAt).toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric" }) : "weekly";
+  const row = (r, me) => `<tr class="${me ? "me" : ""}"><td class="rk">${r.rank === 1 ? "🥇" : r.rank === 2 ? "🥈" : r.rank === 3 ? "🥉" : r.rank || "–"}</td><td class="nmc">${me ? "⭐ " : ""}${tagHtml(r.tags)}${esc(r.name)}</td><td>T${r.tier || 1}</td><td>${nf(r.referred)}</td><td class="tokc">${r.earnedSol ? "◎ " + fmtLam(r.earnedSol) + (r.earned ? " + " : "") : ""}${r.earned || !r.earnedSol ? "◈ " + formatToken(r.earned) : ""}</td></tr>`;
   const inTop = lb.me && lb.me.rank > 0 && lb.me.rank <= lb.rows.length;
   const people = mine.list.length ? mine.list.map((p) => `<div class="st-row"><span>${esc(p.name)}</span><b>${p.pack ? "📦 pack bought" : "<span class='dim'>no pack yet</span>"} <span class="tokc">${p.paidSol ? "◎ " + fmtLam(p.paidSol) + (p.paid ? " + " : "") : ""}${p.paid || !p.paidSol ? "◈ " + formatToken(p.paid) : ""}</span></b></div>`).join("")
     : `<p class="dim">Nobody yet — share your link!</p>`;
   el.innerHTML = rankTabs() + `<div class="ref-pad">
     <div class="inv-card"><h3>🤝 Invite friends</h3>
-      <p class="dim">Share your personal link. Whenever someone who joined through it spends on a pack, <b>you get ${rate}%</b> of that amount: as SOL in your balance when they pay a pack with SOL they deposited, or as $AFKMINE when they pay with $AFKMINE. It is paid out of what they spent — nothing is created.</p>
+      <p class="dim">Share your personal link. When someone who joined through it buys a pack, you earn a share of what they spend. Rewards are collected as <b>pending</b> and paid out by hand once a week (${esc(payD)}), after a check.</p>
       <div class="ref-link"><input id="ref-link" class="name-in" readonly value="${esc(refLinkText)}" /><button type="button" class="inv-btn gold" data-r="copyref">Copy</button>${navigator.share ? `<button type="button" class="inv-btn" data-r="shareref">Share</button>` : ""}</div>
-      <div class="ref-stats"><div><b>${nf(mine.count)}</b><small>referred</small></div><div><b class="tokc">${mine.earnedSol ? "◎ " + fmtLam(mine.earnedSol) + "<br>" : ""}◈ ${formatToken(mine.earned)}</b><small>earned</small></div><div><b>${rate}%</b><small>of pack spending</small></div></div>
+      <div class="ref-tier"><b>Your tier: ${tagHtml(mine.tags)} Tier ${mine.tier}</b> · ${pct(mine.packBps)}% of pack spending${mine.shopBps ? " + " + pct(mine.shopBps) + "% of shop spending" : ""}
+        <p class="dim small">${nxt ? "Qualifying referrals (friends who bought a pack): <b>" + mine.qualifying + "</b>. " + nxt.need + " more for Tier " + nxt.tier + " (" + pct(nxt.packBps) + "%" + (nxt.shopBps ? " + " + pct(nxt.shopBps) + "% shop" : "") + ")." : "Qualifying referrals: <b>" + mine.qualifying + "</b>. You are at the top tier."} A tier only applies to purchases made after you reach it.</p></div>
+      <div class="ref-stats"><div><b>${nf(mine.count)}</b><small>referred</small></div><div><b class="tokc">◎ ${fmtLam(mine.accruedLamports)}</b><small>pending</small></div><div><b class="tokc">◎ ${fmtLam(mine.paidLamports)}</b><small>paid out</small></div></div>
+      ${mine.rejectedLamports ? `<p class="dim small">Rejected: ◎ ${fmtLam(mine.rejectedLamports)}</p>` : ""}
       <p class="dim small">Code: <b class="mono">${esc(mine.code)}</b>${state.ref && state.ref.by ? " · you joined through <b>" + esc(state.ref.by) + "</b>" : ""}</p></div>
     <div class="inv-card ref-list"><h3>Your referred players</h3>${people}</div>
     <h3 style="margin:12px 0 6px">🏆 Referral leaderboard</h3>
-    <div class="rank-wrap"><table class="rank-t"><thead><tr><th>#</th><th>User</th><th>Referred</th><th>Earned</th></tr></thead><tbody>
-      ${lb.rows.length ? lb.rows.map((r) => row(r, r.name === myName && lb.me && r.rank === lb.me.rank)).join("") : `<tr><td colspan="4" class="dim">No referrals yet — be the first!</td></tr>`}
-      ${lb.me && !inTop ? `<tr class="gap"><td colspan="4">⋯</td></tr>${row(lb.me, true)}` : ""}
+    <div class="rank-wrap"><table class="rank-t"><thead><tr><th>#</th><th>User</th><th>Tier</th><th>Referred</th><th>Earned</th></tr></thead><tbody>
+      ${lb.rows.length ? lb.rows.map((r) => row(r, r.name === myName && lb.me && r.rank === lb.me.rank)).join("") : `<tr><td colspan="5" class="dim">No referrals yet — be the first!</td></tr>`}
+      ${lb.me && !inTop ? `<tr class="gap"><td colspan="5">⋯</td></tr>${row(lb.me, true)}` : ""}
     </tbody></table></div>
-    <p class="dim small rank-note">Ranked by the value earned from referrals (SOL plus $AFKMINE at the current price), then by number of referred players.</p></div>`;
+    <p class="dim small rank-note">Ranked by referral rewards (pending + paid), then by number of referred players. Tags: gold OG = here in Season 0; T2 silver and T3 premium = referral tiers.</p></div>`;
 }
 async function copyRefLink() {
   try { await navigator.clipboard.writeText(refLinkText); toast("Link copied 📋"); }

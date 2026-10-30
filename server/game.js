@@ -49,11 +49,14 @@ function createGame({ store, now: nowFn, rng: rngOpt }) {
   }
 
   // ---- persistence ------------------------------------------------------------------------------
-  const meta = () => ({ season: db.season, lastTick: db.lastTick, bonus: db.bonus, withdrawals: db.withdrawals, orders: db.orders, pool: db.pool, treasury: db.treasury });
+  const meta = () => ({ season: db.season, lastTick: db.lastTick, bonus: db.bonus, withdrawals: db.withdrawals, orders: db.orders, pool: db.pool, treasury: db.treasury, refEntries: db.refEntries, admin: db.admin, ogDone: db.ogDone });
   // append-only rows (full trade history, treasury ledger) travel with the next durable save
-  let extra = { trades: [], ledger: [] };
-  const takeExtra = () => { const x = extra; extra = { trades: [], ledger: [] }; return x; };
-  const putBackExtra = (x) => { extra.trades.unshift(...x.trades); extra.ledger.unshift(...x.ledger); };
+  let extra = { trades: [], ledger: [], candles: {} };
+  const hasExtra = () => extra.trades.length || extra.ledger.length || Object.keys(extra.candles).length;
+  const takeExtra = () => { const x = { trades: extra.trades, ledger: extra.ledger, candles: Object.values(extra.candles) }; extra = { trades: [], ledger: [], candles: {} }; return x; };
+  const putBackExtra = (x) => { extra.trades.unshift(...x.trades); extra.ledger.unshift(...x.ledger); for (const c of x.candles) if (!extra.candles[c.t]) extra.candles[c.t] = c; };
+  // append-only audit trail of admin / system decisions (stored as ledger rows of kind "audit", never edited or deleted)
+  const audit = (admin, action, data) => { extra.ledger.push({ t: now(), kind: "audit", admin: String(admin || "admin"), action, data: data || {} }); touchMeta(); };
   const addLedger = (kind, p, lamports, more) => { extra.ledger.push({ t: now(), kind, pid: p ? p.id : null, lamports, ...more }); };
   // all store writes run one after another (a mutex): the pool version in each write is always newer than the one before
   let saveChain = Promise.resolve();
@@ -61,8 +64,9 @@ function createGame({ store, now: nowFn, rng: rngOpt }) {
   async function load() {
     const d = await store.load();
     db.players = d.players || {};
-    Object.assign(db, { season: null, lastTick: 0, bonus: 0, withdrawals: {}, orders: {}, pool: null, treasury: null }, d.meta || {});
-    initMarket();
+    Object.assign(db, { season: null, lastTick: 0, bonus: 0, withdrawals: {}, orders: {}, pool: null, treasury: null, refEntries: {}, admin: null, ogDone: false }, d.meta || {});
+    db.admin = Object.assign({ salt: crypto.randomBytes(16).toString("hex"), ogExcluded: [], flags: {} }, db.admin || {});
+    candleList = await store.candles(); initMarket();
     // players saved by the old browser-trusting version have no server-side game state: forget them
     const legacy = Object.keys(db.players).filter((id) => !db.players[id].mines || !db.players[id].sessions);
     legacy.forEach((id) => delete db.players[id]);
@@ -70,6 +74,7 @@ function createGame({ store, now: nowFn, rng: rngOpt }) {
     for (const p of Object.values(db.players)) { if (p.refCode) byRef.set(p.refCode, p); }
     for (const p of Object.values(db.players)) { migrate(p); if (p.wallet) byWallet.set(p.wallet, p); }
     migrateWithdrawals();
+    buildRefIndex(); grantOG();
     for (const p of Object.values(db.players)) { if (p.referredBy && !db.players[p.referredBy]) p.referredBy = null; refAdd(p.referredBy, 1); }
     if (!db.season) { db.season = { start: env.SEASON_START ? Date.parse(env.SEASON_START) : now() }; db.lastTick = now(); touchMeta(); }
   }
@@ -95,6 +100,9 @@ function createGame({ store, now: nowFn, rng: rngOpt }) {
     p.solBalance = Number.isSafeInteger(p.solBalance) && p.solBalance > 0 ? p.solBalance : 0;
     p.tradeStats = Object.assign({ lastTradeAt: 0, day: "", soldLamports: 0, depositedLamports: 0, refCovered: 0, bought: 0, sold: 0, trades: 0 }, p.tradeStats);
     p.refEarnedSol = p.refEarnedSol || 0; p.refPaidSol = p.refPaidSol || 0;
+    // v5: referral tier bookkeeping, cosmetic tags, hashed IPs for the admin risk flags
+    p.refQual = Array.isArray(p.refQual) ? p.refQual : [];
+    p.tierMax = p.tierMax || 1; p.tags = Array.isArray(p.tags) ? p.tags : []; p.ips = Array.isArray(p.ips) ? p.ips : [];
     if (p.q.depDone == null) p.q.depDone = (p.q.deposited || 0) >= 50000;   // the old "Deposit 50,000 $AFKMINE" quest: a finished one stays finished
     if (!Number.isFinite(p.balance) || p.balance < 0) p.balance = 0;
     if (!p.refCode) { p.refCode = newRefCode(); byRef.set(p.refCode, p); dirty.add(p.id); }
@@ -103,8 +111,8 @@ function createGame({ store, now: nowFn, rng: rngOpt }) {
   }
   function flush() {
     return serial(async () => {
-      if (!dirty.size && !metaDirty && !extra.trades.length && !extra.ledger.length) return;
-      const list = [...dirty].map((id) => db.players[id]).filter(Boolean), m = metaDirty || extra.trades.length || extra.ledger.length ? meta() : null, x = takeExtra();
+      if (!dirty.size && !metaDirty && !hasExtra()) return;
+      const list = [...dirty].map((id) => db.players[id]).filter(Boolean), m = metaDirty || hasExtra() ? meta() : null, x = takeExtra();
       dirty.clear(); metaDirty = false;
       try { await store.save(list, m, undefined, x); } catch (e) { list.forEach((p) => dirty.add(p.id)); if (m) metaDirty = true; putBackExtra(x); throw e; }
     });
@@ -158,7 +166,7 @@ function createGame({ store, now: nowFn, rng: rngOpt }) {
       balance: 0, solBalance: 0, tradeStats: { lastTradeAt: 0, day: "", soldLamports: 0, depositedLamports: 0, refCovered: 0, bought: 0, sold: 0, trades: 0 }, earned: 0, claimed: false, history: [], lastWithdrawAt: 0,
       bag: { shards: 0, boost_xp: 0, boost_earn: 0, boost_power: 0 }, daily: { last: "", streak: 0 }, dq: { day: "", prog: {}, claimed: {}, bonus: false },
       sq: { start: 0, prog: {}, claimed: {} }, offAcc: { mine: 0, items: 0, crates: 0, shards: 0 },
-      refCode: newRefCode(), referredBy: null, refEarned: 0, refPaid: 0, refEarnedSol: 0, refPaidSol: 0,
+      refCode: newRefCode(), referredBy: null, refEarned: 0, refPaid: 0, refEarnedSol: 0, refPaidSol: 0, refQual: [], tierMax: 1, tags: [], ips: [],
     };
     // referral link (?ref=CODE): only a brand-new account can be referred, never by itself or by an account with the same wallet
     const r = ref ? byRef.get(String(ref).toUpperCase().slice(0, 12)) : null;
@@ -413,7 +421,7 @@ function createGame({ store, now: nowFn, rng: rngOpt }) {
     boardCache = { t: Date.now(), v };
     return v;
   }
-  const row = (r, i) => ({ rank: i + 1, name: r.p.name, level: r.p.hero.lvl, power: Math.round(r.p.power), items: r.p.items, earned: r.p.earned, prize: prizeFor(i + 1), pts: r.pts, pack: isPaid(r.p) });
+  const row = (r, i) => ({ rank: i + 1, name: r.p.name, level: r.p.hero.lvl, power: Math.round(r.p.power), items: r.p.items, earned: r.p.earned, prize: prizeFor(i + 1), pts: r.pts, pack: isPaid(r.p), tags: tagsOf(r.p) });
   const seasonInfo = () => ({ start: db.season.start, end: seasonEnd(), now: now(), over: over(), days: C.SEASON_DAYS });
   function leaderboard(p) {
     const b = board();
@@ -426,23 +434,30 @@ function createGame({ store, now: nowFn, rng: rngOpt }) {
     if (!refCache.v || Date.now() - refCache.t > 3000) {
       const all = [];
       for (const q of Object.values(db.players)) {
-        const n = refCount(q);
-        if (n > 0 || q.refEarned > 0 || q.refEarnedSol > 0) all.push({ id: q.id, name: q.name, referred: n, earned: q.refEarned, earnedSol: q.refEarnedSol });
+        const n = refCount(q), tt = refTotals(q.id), sol = tt.accrued + tt.paid;
+        if (n > 0 || sol > 0) all.push({ id: q.id, name: q.name, referred: n, qualifying: q.refQual.length, tierMax: q.tierMax, earned: 0, earnedSol: sol, tags: tagsOf(q) });
       }
-      const px = spot(), val = (r) => r.earned * px + r.earnedSol / 1e9;      // rank by what they earned, SOL and $AFKMINE at today's price
+      const val = (r) => r.earnedSol;      // rank by the value earned (accrued + paid, in SOL)
       all.sort((a, b) => val(b) - val(a) || b.referred - a.referred || a.name.localeCompare(b.name));
       refCache = { t: Date.now(), v: all };
     }
-    const all = refCache.v, row = (r, i) => ({ rank: i + 1, name: r.name, referred: r.referred, earned: r.earned, earnedSol: r.earnedSol });
+    const all = refCache.v, row = (r, i) => ({ rank: i + 1, name: r.name, referred: r.referred, qualifying: r.qualifying, tier: r.tierMax, tags: r.tags, earned: r.earned, earnedSol: r.earnedSol });
     const mine = p ? all.findIndex((r) => r.id === p.id) : -1;
-    return { rate: C.REF_RATE, total: all.length, rows: all.slice(0, C.REF_BOARD_SIZE).map(row),
-      me: p ? (mine >= 0 ? row(all[mine], mine) : { rank: 0, name: p.name, referred: refCount(p), earned: p.refEarned, earnedSol: p.refEarnedSol }) : null };
+    return { tiers: C.REF_TIERS, total: all.length, rows: all.slice(0, C.REF_BOARD_SIZE).map(row),
+      me: p ? (mine >= 0 ? row(all[mine], mine) : { rank: 0, name: p.name, referred: refCount(p), qualifying: p.refQual.length, tier: p.tierMax, tags: tagsOf(p), earned: 0, earnedSol: 0 }) : null };
+  }
+  // tier, progress and money status for the player's Referrals tab
+  function refInfo(p) {
+    const n = p.refQual.length, tier = tierFor(n), nx = nextTier(n), tt = refTotals(p.id);
+    return { count: refCount(p), qualifying: n, tier: tier.tier, tierMax: p.tierMax, packBps: tier.packBps, shopBps: tier.shopBps, tiers: C.REF_TIERS,
+      next: nx ? { tier: nx.tier, need: nx.min - n, packBps: nx.packBps, shopBps: nx.shopBps } : null,
+      accruedLamports: tt.accrued, paidLamports: tt.paid, rejectedLamports: tt.rejected, nextPayoutAt: nextPayoutAt(now()), tags: tagsOf(p) };
   }
   // the player's own referral page: code and the people they brought in (with what each one has paid them so far)
   function referrals(p) {
     const list = Object.values(db.players).filter((o) => o.referredBy === p.id)
-      .map((o) => ({ name: o.name, pack: isPaid(o), paid: o.refPaid || 0, paidSol: o.refPaidSol || 0 })).sort((a, b) => (b.paid * spot() + b.paidSol / 1e9) - (a.paid * spot() + a.paidSol / 1e9) || a.name.localeCompare(b.name)).slice(0, 100);
-    return { code: p.refCode, rate: C.REF_RATE, count: refCount(p), earned: p.refEarned, earnedSol: p.refEarnedSol, list };
+      .map((o) => ({ name: o.name, pack: isPaid(o), paid: 0, paidSol: (refByRid.get(p.id) || []).filter((e) => e.bid === o.id && e.status !== "rejected").reduce((a, e) => a + e.amount, 0) })).sort((a, b) => b.paidSol - a.paidSol || a.name.localeCompare(b.name)).slice(0, 100);
+    return { code: p.refCode, ...refInfo(p), earned: p.refEarned, earnedSol: p.refEarnedSol, list };
   }
 
   // ---- what the client gets to see ------------------------------------------------------------------------------
@@ -503,14 +518,15 @@ function createGame({ store, now: nowFn, rng: rngOpt }) {
       cash: p.cash, balance: p.balance, solBalance: p.solBalance, trade: tradeView(p, t), price: spot(), earned: p.earned, totalEarned: p.stats.totalEarned, claimed: !!p.claimed,
       mine: { prestigeMult: m.prestigeMult, warehouse: m.warehouse, elevator: m.elevator, shafts: m.shafts.map((s) => ({ level: s.level })), unlockedShaftCount: m.unlockedShaftCount, maxUnlocked: m.maxUnlocked },
       bag: p.bag, daily: dailyView(p, t), dailyQuests: questView(p, t, "daily"), seasonQuests: questView(p, t, "season"),
-      ref: { code: p.refCode, rate: C.REF_RATE, earned: p.refEarned, earnedSol: p.refEarnedSol, count: refCount(p), by: p.referredBy && db.players[p.referredBy] ? db.players[p.referredBy].name : null },
+      tags: tagsOf(p),
+      ref: { code: p.refCode, ...refInfo(p), earned: p.refEarned, earnedSol: p.refEarnedSol, by: p.referredBy && db.players[p.referredBy] ? db.players[p.referredBy].name : null },
       boosts: p.boosts, hero: p.hero, inv: p.inv, eq: p.eq, invPages: p.invPages, items: p.items,
       pendingOffline: p.pendingOffline, pending: pendingView(p), devFaucet: C.DEV_FAUCET,
       quests: S.questStates(p, t), social: { x: p.q.x, discord: p.q.discord },
       earnBoost: { quest: S.questBoost(p, t), total: S.earnBoost(p, t) },
       offline: { unlocked: S.offlineUnlocked(p, t), freeMin: C.OFFLINE_FREE_MS / 60000, maxHours: C.OFFLINE_MAX_MS / 3600e3,
         away: { cash: p.pendingOffline, mine: p.offAcc.mine, items: p.offAcc.items, crates: p.offAcc.crates, shards: p.offAcc.shards } },
-      power: p.power, cashPerSec: inc.perSec, season: seasonInfo(), mining: mining(p),
+      power: p.power, gate: S.gateInfo(p, t), cashPerSec: inc.perSec, season: seasonInfo(), mining: mining(p),
       free: { cap: C.FREE_EARN_CAP, onboardCap: C.ONBOARD_CAP, earned: p.earned },
       events: p.events,
     };
@@ -539,11 +555,36 @@ function createGame({ store, now: nowFn, rng: rngOpt }) {
         feeSol: "0", feeTok: "0", minted: 0, burned: 0, reserve: C.EMISSION_RESERVE_TOKENS, trades: [], hist: [[now(), S.spotPrice(BigInt(C.POOL_INIT_LAMPORTS), BigInt(C.POOL_INIT_MICRO))]] };
       touchMeta();
     }
+    if (!candleList.length) candleTick(spot(), 0);          // first candle at the starting price
     if (!db.treasury) { db.treasury = { depositsIn: 0, withdrawnNet: 0, withdrawFees: 0, packRevenue: 0, referralPaid: 0, legacyPacks: 0 }; touchMeta(); }
   }
   const res = () => ({ sol: BigInt(db.pool.sol), tok: BigInt(db.pool.tok) });
   const spot = () => { const r = res(); return S.spotPrice(r.sol, r.tok); };
-  function setRes(sol, tok) { db.pool.sol = String(sol); db.pool.tok = String(tok); db.pool.v++; recordPrice(); touchMeta(); }
+  function setRes(sol, tok, vol) { db.pool.sol = String(sol); db.pool.tok = String(tok); db.pool.v++; recordPrice(); candleTick(spot(), vol || 0); touchMeta(); }
+  // ---- OHLC candles (5 min), persisted through the store so the chart survives restarts ----
+  let candleList = [];
+  function candleTick(price, vol) {
+    const t = now(), b = Math.floor(t / C.CANDLE_MS) * C.CANDLE_MS, last = candleList[candleList.length - 1];
+    let c;
+    if (last && last.t === b) { c = last; c.h = Math.max(c.h, price); c.l = Math.min(c.l, price); c.c = price; }
+    else { const o = last ? last.c : price; c = { t: b, o, h: Math.max(o, price), l: Math.min(o, price), c: price, v: 0, n: 0 }; candleList.push(c); if (candleList.length > C.CANDLES_MAX) candleList.shift(); }
+    if (vol > 0) { c.v += vol; c.n++; }
+    extra.candles[b] = c;
+  }
+  const RANGES = { "24h": 86400e3, "3d": 3 * 86400e3, "7d": 7 * 86400e3, "30d": 30 * 86400e3, all: Infinity };
+  // candles for one chart range, merged into at most CHART_MAX_POINTS points: [t, open, high, low, close, volume(lamports)]
+  function chart(range) {
+    const r = RANGES[range] ? range : "24h", from = RANGES[r] === Infinity ? 0 : now() - RANGES[r];
+    let i = candleList.length; while (i > 0 && candleList[i - 1].t >= from - C.CANDLE_MS) i--;
+    const src = candleList.slice(i);
+    if (!src.length && candleList.length) { const l = candleList[candleList.length - 1]; src.push({ t: l.t, o: l.c, h: l.c, l: l.c, c: l.c, v: 0 }); }   // quiet market: keep showing the last price
+    const k = Math.max(1, Math.ceil(src.length / C.CHART_MAX_POINTS)), pts = [];
+    for (let j = 0; j < src.length; j += k) {
+      const g = src.slice(j, j + k);
+      pts.push([g[0].t, g[0].o, Math.max(...g.map((x) => x.h)), Math.min(...g.map((x) => x.l)), g[g.length - 1].c, g.reduce((a, x) => a + x.v, 0)]);
+    }
+    return { range: r, candleMs: C.CANDLE_MS * k, points: pts };
+  }
   function recordPrice() {
     const h = db.pool.hist, t = now(), pr = spot();
     if (h.length && t - h[h.length - 1][0] < 60e3) h[h.length - 1] = [h[h.length - 1][0], pr]; else h.push([t, pr]);
@@ -577,11 +618,16 @@ function createGame({ store, now: nowFn, rng: rngOpt }) {
     circCache.t = 0;
   }
 
-  const liabilities = () => Object.values(db.players).reduce((a, p) => a + p.solBalance, 0);
+  // locked = SOL a player asked to withdraw that is waiting for the admin (pending) or that failed to send and waits for retry/refund (failed).
+  // It already left the player's balance but has not been paid out, so it is still owed: it counts as a liability.
+  const lockedOut = () => Object.values(db.withdrawals).filter((w) => w.unit === "lamports" && (w.state === "pending" || w.state === "failed")).reduce((a, w) => a + w.amount, 0);
+  const liabilities = () => Object.values(db.players).reduce((a, p) => a + p.solBalance, 0) + lockedOut();
+  // SOL the treasury could pay to sellers right now (never touches balances or locked withdrawals)
+  const sellRoom = () => { const tr = db.treasury; return Math.max(0, tr.depositsIn - tr.withdrawnNet - liabilities() - C.SELL_KEEP_LAMPORTS); };
   const queuedOut = () => Object.values(db.withdrawals).filter((w) => w.unit === "lamports" && (w.state === "queued" || w.state === "signed" || w.state === "sent")).reduce((a, w) => a + w.net, 0);
   function solvency() {
     const tr = db.treasury, liab = liabilities(), assets = tr.depositsIn - tr.withdrawnNet, r = res(), init = BigInt(db.pool.initSol);
-    return { ok: assets >= liab, assets, liabilities: liab, equity: assets - liab, ratio: liab > 0 ? assets / liab : null,
+    return { ok: assets >= liab, assets, liabilities: liab, lockedWithdrawals: lockedOut(), sellRoom: Math.max(0, assets - liab - C.SELL_KEEP_LAMPORTS), equity: assets - liab, ratio: liab > 0 ? assets / liab : null,
       depositsIn: tr.depositsIn, withdrawnNet: tr.withdrawnNet, withdrawFees: tr.withdrawFees, packRevenue: tr.packRevenue, referralPaid: tr.referralPaid, queuedWithdrawals: queuedOut(),
       poolSol: String(r.sol), poolTokens: String(r.tok), poolBackedSol: String(r.sol - init), price: S.spotPrice(r.sol, r.tok),
       circulating: circulating(), minted: db.pool.minted, burned: db.pool.burned, emissionReserve: db.pool.reserve, players: Object.keys(db.players).length };
@@ -598,16 +644,17 @@ function createGame({ store, now: nowFn, rng: rngOpt }) {
     p.solBalance -= lamports; p.tradeStats.depositedLamports -= lamports; db.treasury.depositsIn -= lamports; extra.ledger.pop(); touchMeta();
   }
   // gross leaves the balance; the player receives net on-chain, fee stays with the house
-  function debitWithdraw(p, w) {
-    p.solBalance -= w.amount; db.treasury.withdrawnNet += w.net; db.treasury.withdrawFees += w.fee;
-    addLedger("withdraw", p, w.amount, { id: w.id, net: w.net, fee: w.fee }); touch(p); touchMeta();
-  }
+  // request: the amount leaves the balance and is LOCKED (still a liability) until the admin decides
+  function lockWithdraw(p, w) { p.solBalance -= w.amount; addLedger("withdraw_request", p, w.amount, { id: w.id, net: w.net, fee: w.fee }); touch(p); touchMeta(); }
+  // approval / retry: the treasury now owes the transfer, so it stops being a liability and the ledger shows the outflow (the fee stays with the house)
+  function bookWithdraw(w) { db.treasury.withdrawnNet += w.net; db.treasury.withdrawFees += w.fee; addLedger("withdraw", db.players[w.pid], w.amount, { id: w.id, net: w.net, fee: w.fee }); touchMeta(); }
+  function unbookWithdraw(w) { db.treasury.withdrawnNet -= w.net; db.treasury.withdrawFees -= w.fee; addLedger("withdraw_unbook", db.players[w.pid], w.amount, { id: w.id }); touchMeta(); }
+  // locked funds go back to the balance (reject / refund)
+  function releaseWithdraw(w, reason) { const p = db.players[w.pid]; if (p) { p.solBalance += w.amount; touch(p); } addLedger("withdraw_refund", p, w.amount, { id: w.id, reason: String(reason).slice(0, 120) }); touchMeta(); }
   function refundWithdraw(w, reason) {
     const p = db.players[w.pid];
-    if (w.unit === "lamports") {
-      db.treasury.withdrawnNet -= w.net; db.treasury.withdrawFees -= w.fee;
-      if (p) p.solBalance += w.amount;
-      addLedger("withdraw_refund", p, w.amount, { id: w.id, net: w.net, fee: w.fee, reason: String(reason).slice(0, 120) });
+    if (w.unit === "lamports") {          // (only reached for legacy rows; SOL withdrawals use unbook/release)
+      unbookWithdraw(w); releaseWithdraw(w, reason);
     } else if (p) { p.balance += w.amount; circCache.t = 0; }   // old token withdrawal: back to the $AFKMINE balance 1:1
     touchMeta();
   }
@@ -648,7 +695,7 @@ function createGame({ store, now: nowFn, rng: rngOpt }) {
     const ts = p.tradeStats;
     p.solBalance -= Number(lam); p.balance += Number(q.out) / 1e6; circCache.t = 0;
     db.pool.feeSol = String(BigInt(db.pool.feeSol) + q.fee);
-    setRes(q.newSol, q.newTok);
+    setRes(q.newSol, q.newTok, Number(lam));
     ts.lastTradeAt = t; ts.bought += Number(lam); ts.trades++;
     logTrade(p, "buy", Number(lam), Number(q.out), Number(q.fee), "lamports", t);
     touch(p);
@@ -663,14 +710,14 @@ function createGame({ store, now: nowFn, rng: rngOpt }) {
     const q = S.quote("sell", r.sol, r.tok, tokens, C.TRADE_FEE_BPS);
     if (!q.ok) bad(q.error);
     if (q.out < minOut) bad("Price moved — you would receive less than your minimum", 409);
-    if (C.POOL_SELL_FLOOR === "backed" && q.newSol < BigInt(db.pool.initSol)) bad("The pool can only pay out SOL that buyers put in — try a smaller amount", 409);
     const out = Number(q.out), ts = p.tradeStats, soldToday = ts.day === dayStr(t) ? ts.soldLamports : 0;   // (nothing is written until every check has passed)
     if (soldToday + out > C.DAILY_SELL_CAP_LAMPORTS_PER_PLAYER) bad("Daily sell limit reached (" + (C.DAILY_SELL_CAP_LAMPORTS_PER_PLAYER / 1e9) + " SOL per day) — resets at 00:00 UTC", 429);
-    const sv = solvency();   // the curve may price it, but the treasury must be able to back every SOL balance
-    if (sv.assets < sv.liabilities + out) bad("Selling is paused: the game treasury cannot cover this sale right now. Try a smaller amount later.", 503);
+    // the curve alone sets the price; the only limit is what the treasury can really pay (nobody's SOL balance or locked withdrawal may be touched)
+    const room = sellRoom();
+    if (out > room) bad("Pool liquidity limit reached, try a smaller amount (you can sell up to " + (Number(S.maxSell(r.sol, r.tok, C.TRADE_FEE_BPS, room)) / 1e6).toFixed(2) + " $AFKMINE right now)", 409);
     p.balance = Math.max(0, p.balance - Number(tokens) / 1e6); p.solBalance += out; circCache.t = 0;
     db.pool.feeTok = String(BigInt(db.pool.feeTok) + q.fee);
-    setRes(q.newSol, q.newTok);
+    setRes(q.newSol, q.newTok, out);
     ts.lastTradeAt = t; ts.day = dayStr(t); ts.soldLamports = soldToday + out; ts.sold += out; ts.trades++;
     logTrade(p, "sell", out, Number(tokens), Number(q.fee), "micro", t);
     touch(p);
@@ -679,17 +726,20 @@ function createGame({ store, now: nowFn, rng: rngOpt }) {
   const TRADE_TYPES = new Set(["tradeBuy", "tradeSell"]);
 
   // public numbers for GET /api/pool
-  function poolView() {
+  function poolView(range) {
     const t = now(), r = res(), pr = S.spotPrice(r.sol, r.tok), old = price24h(t);
     return { now: t, price: pr, change24h: old > 0 ? (pr / old - 1) * 100 : 0, solReserve: String(r.sol), tokenReserve: String(r.tok), initSol: db.pool.initSol, initTokens: db.pool.initTok,
       backedSol: String(r.sol - BigInt(db.pool.initSol)), feeBps: C.TRADE_FEE_BPS, circulating: circulating(), minted: db.pool.minted, burned: db.pool.burned,
-      emissionMode: C.EMISSION_MODE, sinkMode: C.ECONOMY_SINK_MODE, sellFloor: C.POOL_SELL_FLOOR, trades: db.pool.trades, history: db.pool.hist,
+      emissionMode: C.EMISSION_MODE, sinkMode: C.ECONOMY_SINK_MODE, trades: db.pool.trades, chart: chart(range),
       limits: { maxTradePct: C.MAX_TRADE_POOL_PCT, cooldownMs: C.TRADE_COOLDOWN_MS, dailySellCapLamports: C.DAILY_SELL_CAP_LAMPORTS_PER_PLAYER, needWallet: C.TRADE_NEED_WALLET, needPack: C.SELL_NEED_PACK } };
   }
   // what one player may do right now (part of the player view)
   function tradeView(p, t) {
     const ts = p.tradeStats, soldToday = ts.day === dayStr(t) ? ts.soldLamports : 0;
-    return { cooldownLeft: Math.max(0, ts.lastTradeAt + C.TRADE_COOLDOWN_MS - t), soldToday, dailyCap: C.DAILY_SELL_CAP_LAMPORTS_PER_PLAYER,
+    const r = res(), room = sellRoom(), dayLeft = Math.max(0, C.DAILY_SELL_CAP_LAMPORTS_PER_PLAYER - soldToday);
+    const capTok = BigInt(Math.max(0, Math.min(Math.floor(p.balance * 1e6 + 1e-6), Number((r.tok * poolPctBps()) / 10000n))));
+    const maxSellMicro = Number(S.maxSell(r.sol, r.tok, C.TRADE_FEE_BPS, Math.min(room, dayLeft), capTok));   // largest sell right now: balance, pool size, daily cap and treasury room
+    return { cooldownLeft: Math.max(0, ts.lastTradeAt + C.TRADE_COOLDOWN_MS - t), soldToday, sellRoom: room, maxSellMicro, dailyCap: C.DAILY_SELL_CAP_LAMPORTS_PER_PLAYER,
       canTrade: !C.TRADE_NEED_WALLET || !!p.wallet, canSell: (!C.TRADE_NEED_WALLET || !!p.wallet) && (!C.SELL_NEED_PACK || isPaid(p)), bought: ts.bought, sold: ts.sold, trades: ts.trades };
   }
 
@@ -722,34 +772,95 @@ function createGame({ store, now: nowFn, rng: rngOpt }) {
     touch(p);
     return payReferral(p, pack, how, tokens);
   }
-  // The referrer of a buyer gets C.REF_RATE (25 %) of what the buyer paid. Returns the referrer (so the caller can save them too).
-  //  * "sol": 25 % of the price as SOL balance, out of the pack revenue that was just booked - never minted. Only if the buyer's lifetime REAL deposits
-  //           cover this pack (otherwise SOL sold out of the pool could be looped through alt accounts into real money).
-  //  * "mine": 25 % of the tokens the buyer spent go to the referrer, the rest is burned / recycled. Nothing is created.
-  function payReferral(p, pack, how, tokens) {
-    const r = p.referredBy && db.players[p.referredBy];
-    if (how === "mine") {
-      const spent = tokens || 0;
-      let amt = r && r !== p ? Math.floor(spent * C.REF_RATE * 1e4) / 1e4 : 0;
-      if (!(amt > 0)) amt = 0;
-      sink(spent - amt);
-      if (!amt) return null;
-      r.balance += amt; r.refEarned += amt; p.refPaid += amt; circCache.t = 0;
-      evt(r, "🤝 " + p.name + " bought a pack — you earned " + Math.floor(amt) + " $AFKMINE!");
-      touch(r);
-      return r;
-    }
-    if (how === "legacy" || !r || r === p) return null;   // "legacy" = an old order that was paid to the merchant wallet, not the treasury: no referral
-    const ts = p.tradeStats;
-    if (ts.depositedLamports - ts.refCovered < pack.lamports) return null;      // not paid with real money: no referral reward
-    const amt = Math.floor(pack.lamports * C.REF_RATE);
-    if (!(amt > 0) || amt > db.treasury.packRevenue - db.treasury.referralPaid) return null;
-    ts.refCovered += pack.lamports;
-    r.solBalance += amt; r.refEarnedSol += amt; p.refPaidSol += amt; db.treasury.referralPaid += amt;
-    addLedger("referral", r, amt, { from: p.id, pack: pack.id });
-    evt(r, "🤝 " + p.name + " bought a pack — you earned " + (amt / 1e9).toFixed(4) + " SOL!");
-    touch(r); touchMeta();
+  // ---- referral tiers, accrual ledger and weekly manual payouts -------------------------------------------------------
+  // A purchase never pays anybody directly: it writes an ENTRY (status "accrued"). An admin reviews the entries once a week and pays them out.
+  const refByRid = new Map();                 // referrer id -> entries
+  function buildRefIndex() { refByRid.clear(); for (const e of Object.values(db.refEntries)) { if (!refByRid.has(e.rid)) refByRid.set(e.rid, []); refByRid.get(e.rid).push(e); } }
+  const tierFor = (n) => { let t = C.REF_TIERS[0]; for (const x of C.REF_TIERS) if (n >= x.min) t = x; return t; };
+  const nextTier = (n) => C.REF_TIERS.find((x) => x.min > n) || null;
+  const lamportsOfMine = (tokens) => Math.floor(tokens * spot() * 1e9);          // $AFKMINE valued at the pool price of this very moment
+  function weekKey(t) { const d = new Date(t), dow = (d.getUTCDay() + 6) % 7; return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() - dow)).toISOString().slice(0, 10); }
+  function nextPayoutAt(t) { const d = new Date(t); let add = (C.REF_PAYOUT_DOW - d.getUTCDay() + 7) % 7; if (add === 0) add = 7; return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + add); }
+  function addTag(p, tag) { if (!p.tags.includes(tag)) { p.tags.push(tag); touch(p); } }
+  // OG first, then the highest referral tag. Pure cosmetics.
+  const tagsOf = (p) => { const out = []; if (p.tags.includes("og")) out.push("og"); const r = p.tags.includes("ref3") ? "ref3" : p.tags.includes("ref2") ? "ref2" : null; if (r) out.push(r); return out; };
+  function accrueRef(buyer, kind, cur, lamports, real) {
+    const r = buyer.referredBy && db.players[buyer.referredBy];
+    if (!r || r === buyer || !(lamports > 0)) return null;
+    if (kind === "pack" && !r.refQual.includes(buyer.id)) r.refQual.push(buyer.id);   // this purchase is what makes the referral "qualifying"
+    const n = r.refQual.length, tier = tierFor(n);                                       // recomputed now, applies to THIS purchase only
+    if (tier.tier > r.tierMax) { r.tierMax = tier.tier; if (tier.tier >= 2) addTag(r, "ref" + tier.tier); }
+    const bps = kind === "pack" ? tier.packBps : tier.shopBps, amount = Math.floor((lamports * bps) / 10000);
+    touch(r);
+    if (!(amount > 0)) return r;
+    const e = { id: crypto.randomBytes(6).toString("hex"), t: now(), rid: r.id, bid: buyer.id, kind, cur, spend: lamports, tier: tier.tier, bps, amount, real: !!real, status: "accrued", week: weekKey(now()) };
+    db.refEntries[e.id] = e; if (!refByRid.has(r.id)) refByRid.set(r.id, []); refByRid.get(r.id).push(e);
+    addLedger("referral_accrued", r, amount, { entry: e.id, from: buyer.id, kind, tier: tier.tier });
+    evt(r, "🤝 " + buyer.name + " " + (kind === "pack" ? "bought a pack" : "spent in the shop") + " — " + (amount / 1e9).toFixed(5) + " SOL accrued (tier " + tier.tier + "), paid out in the weekly batch.");
+    refCache.v = null; touchMeta();
     return r;
+  }
+  // how = "sol" (paid from the SOL balance) | "mine" (paid in $AFKMINE, `tokens` already debited) | "legacy" (old order paid to the merchant wallet: nothing accrues)
+  function payReferral(p, pack, how, tokens) {
+    if (how === "mine") { const spent = tokens || 0; sink(spent); return accrueRef(p, "pack", "mine", lamportsOfMine(spent), false); }
+    if (how === "legacy") return null;
+    const ts = p.tradeStats, real = ts.depositedLamports - ts.refCovered >= pack.lamports;     // paid with SOL that was really deposited => real revenue
+    if (real) ts.refCovered += pack.lamports;
+    return accrueRef(p, "pack", "sol", pack.lamports, real);
+  }
+  const refTotals = (rid) => { const o = { accrued: 0, paid: 0, rejected: 0 }; for (const e of refByRid.get(rid) || []) { if (e.status === "accrued" || e.status === "approved") o.accrued += e.amount; else if (e.status === "paid") o.paid += e.amount; else o.rejected += e.amount; } return o; };
+  // Admin: pay accrued entries (all of them, or the given ids). Atomic and idempotent: only entries still "accrued" are touched, so a repeated call pays nothing twice.
+  // Entries funded by real SOL revenue are credited as SOL balance; $AFKMINE-funded ones (nothing real came in) are paid as $AFKMINE at today's pool price.
+  function refPayout(ids, admin) {
+    const list = (ids ? ids.map((i) => db.refEntries[i]) : Object.values(db.refEntries)).filter((e) => e && e.status === "accrued");
+    const real = list.filter((e) => e.real && db.players[e.rid]).reduce((a, e) => a + e.amount, 0), tr = db.treasury;
+    if (real > tr.packRevenue - tr.referralPaid) bad("Not enough pack revenue to cover the real-SOL part of this batch", 503);
+    if (real > solvency().equity) bad("The treasury cannot cover this batch right now", 503);
+    db.admin.batchSeq = (db.admin.batchSeq || 0) + 1;
+    const batch = "B" + weekKey(now()) + "-" + db.admin.batchSeq, paidIds = [], touched = new Set();
+    for (const e of list) {
+      const r = db.players[e.rid];
+      if (!r) { e.status = "rejected"; e.reason = "Account deleted"; continue; }
+      e.status = "approved";
+      if (e.real) { r.solBalance += e.amount; r.refEarnedSol += e.amount; tr.referralPaid += e.amount; e.paidAs = "sol"; e.paidAmount = e.amount; }
+      else { const tok = Math.floor((e.amount / 1e9 / spot()) * 1e4) / 1e4; mint(r, tok); r.refEarned += tok; e.paidAs = "afk"; e.paidAmount = tok; }
+      const b = db.players[e.bid]; if (b && e.real) b.refPaidSol += e.amount;
+      e.status = "paid"; e.paidAt = now(); e.batch = batch; e.paidBy = String(admin || "admin").slice(0, 40);
+      addLedger("referral", r, e.amount, { entry: e.id, from: e.bid, as: e.paidAs });
+      evt(r, "🤝 Referral payout: " + (e.paidAs === "sol" ? (e.amount / 1e9).toFixed(5) + " SOL" : Math.floor(e.paidAmount) + " $AFKMINE") + " credited.");
+      touch(r); touched.add(r); paidIds.push(e.id);
+    }
+    if (paidIds.length) { refCache.v = null; audit(admin, "referrals.payout", { batch, count: paidIds.length, realLamports: real }); touchMeta(); }
+    return { batch, paid: paidIds.length, realLamports: real, players: [...touched] };
+  }
+  function refReject(ids, reason, admin) {
+    const why = String(reason || "").trim().slice(0, 200); if (!why) bad("A reason is required");
+    let n = 0; for (const i of ids) { const e = db.refEntries[i]; if (e && e.status === "accrued") { e.status = "rejected"; e.reason = why; e.rejectedAt = now(); n++; } }
+    if (n) { refCache.v = null; audit(admin, "referrals.reject", { count: n, reason: why }); touchMeta(); }
+    return { rejected: n };
+  }
+  // remembers (as a salted hash, last 5 per player) where a player connected from; only used for the admin risk flags
+  function noteIp(p, ip) {
+    const h = crypto.createHmac("sha256", db.admin.salt).update(String(ip)).digest("hex").slice(0, 16), t = now(), e = p.ips.find((x) => x.h === h);
+    if (e) { if (t - e.t > 3600e3) { e.t = t; touch(p); } return; }
+    p.ips.unshift({ h, t }); if (p.ips.length > 5) p.ips.length = 5; touch(p);
+  }
+  // OG: the golden tag of Season 0, granted ONCE (to every account that exists the first time this version starts), permanent
+  function grantOG() {
+    if (db.ogDone) return;
+    const cut = C.SEASON0_CUTOFF || now();
+    db.admin.og0 = cut;
+    for (const p of Object.values(db.players)) if (p.created <= cut && !db.admin.ogExcluded.includes(p.id)) addTag(p, "og");
+    db.ogDone = true; touchMeta();
+  }
+  function setOGExcluded(pid, exclude, admin) {
+    const p = db.players[pid]; if (!p) bad("Unknown player", 404);
+    const ex = db.admin.ogExcluded, has = ex.includes(pid);
+    if (exclude && !has) ex.push(pid);
+    if (exclude) p.tags = p.tags.filter((t) => t !== "og");
+    else { if (has) ex.splice(ex.indexOf(pid), 1); if (p.created <= (db.admin.og0 || 0)) addTag(p, "og"); }
+    touch(p); touchMeta(); audit(admin, exclude ? "og.exclude" : "og.include", { player: pid });
+    return { tags: tagsOf(p) };
   }
 
   const boost = (p, k, mins, t) => { p.boosts[k] = Math.max(t, p.boosts[k]) + mins * 60000; };
@@ -798,10 +909,10 @@ function createGame({ store, now: nowFn, rng: rngOpt }) {
       } else if (Object.prototype.hasOwnProperty.call(BOOST_ITEMS, key)) {
         // boosts are bought as ITEMS now: they land in the bag and do nothing until the player uses them (action "useItem")
         if (p.bag[key] >= S.BAG_MAX) bad("Your bag is full of that item");
-        spendMine(p, PRICES[key]); p.bag[key]++;
+        spendMine(p, PRICES[key]); p.bag[key]++; accrueRef(p, "shop", "mine", lamportsOfMine(PRICES[key]), false);
       } else if (key === "page") {
         if (p.invPages >= C.MAX_PAGES) bad("All pages unlocked");
-        spendMine(p, S.PAGE_COST[p.invPages]); p.invPages++;
+        spendMine(p, S.PAGE_COST[p.invPages]); accrueRef(p, "shop", "mine", lamportsOfMine(S.PAGE_COST[p.invPages]), false); p.invPages++;
       } else bad("Unknown item");
     },
     // "Welcome back": pays the cash earned while away and clears the tally of what else was found/mined meanwhile
@@ -991,6 +1102,7 @@ function createGame({ store, now: nowFn, rng: rngOpt }) {
   function prune() {
     const t = now(), gone = [];
     for (const p of Object.values(db.players)) {
+      if (p.ips.length) { const keep = p.ips.filter((x) => t - x.t < 30 * DAY); if (keep.length !== p.ips.length) { p.ips = keep; touch(p); } }   // hashed IPs are kept 30 days
       if (!p.wallet && !isPaid(p) && t - p.lastSeen > 45 * DAY && p.balance < 1) gone.push(p.id);
     }
     gone.forEach((id) => {
@@ -1007,7 +1119,7 @@ function createGame({ store, now: nowFn, rng: rngOpt }) {
     db, C, S, now, saveNow, store, setClock: (ms) => { clockOffset = ms; }, load, flush, touch, touchMeta, metaDirty: () => metaDirty,
     createPlayer, findByWallet, linkWallet, newSession, authToken, dropSession, uniqueName, cleanName,
     touchPlayer, settle, tick, view, act, leaderboard, board, mining, stats, deleteAccount, grantPack, spendMine, debitMine, spendSol, addHistory, evt,
-    poolView, solvency, solvencyLine, packMinePrice, creditDeposit, undoDeposit, debitWithdraw, refundWithdraw, addSol, mint, sink, spot, TRADE_TYPES, 
+    poolView, solvency, solvencyLine, packMinePrice, creditDeposit, undoDeposit, audit, noteIp, refPayout, refReject, setOGExcluded, tagsOf, refInfo, tierFor, weekKey, nextPayoutAt, refTotals, lockWithdraw, bookWithdraw, unbookWithdraw, releaseWithdraw, refundWithdraw, sellRoom, chart, addSol, mint, sink, spot, TRADE_TYPES, 
     refBoard, referrals, rollQ, bumpQ, dayStr,
     isPaid, isActive, over, seasonEnd, prune, ApiError, bad, intIn, rng, ACTIONS, PACKS, SOL,
   };

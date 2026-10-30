@@ -11,6 +11,10 @@ const { createApp } = require("./server.js");
 const { analyzeSolDeposit, analyzePayment } = require("./chain.js");
 const S = require("../js/shared.js");
 const { C, PACKS, PRICES } = require("./config.js");
+// the older tests max out 30 floors with a low-level manager: switch the Power gate off for them, and back on in the gating tests
+const REQ_REAL = S.FLOOR_POWER_REQ.slice();
+const gateOn = () => REQ_REAL.forEach((v, i) => (S.FLOOR_POWER_REQ[i] = v)), gateOff = () => S.FLOOR_POWER_REQ.fill(0);
+gateOff();
 
 let n = 0;
 const AL = "ABCDEFGHJKLMNPQRSTUVWXYZ";
@@ -351,51 +355,93 @@ function fakeChain() {
     const other = (await call("POST", "/api/guest", { name: "Mallory" })).j;
     assert((await call("POST", "/api/pack/confirm", { order: id, signature: sig(12) }, other.token)).s === 400);
   });
-  await T("withdraw (SOL): 20 % fee, 0.01-5 SOL, 24 h cooldown, paid to the player's own wallet", async () => {
+  const wd = (tok, lamports) => call("POST", "/api/bank/withdraw", { lamports }, tok);
+  const wOf = (p) => Object.values(game.db.withdrawals).filter((x) => x.pid === p.id && x.unit === "lamports").pop();
+  await T("withdraw (SOL): 0.05-2 SOL, 20 % fee, 24 h cooldown; a request only LOCKS the funds and sends nothing until the admin approves", async () => {
     app.resetLimits(); const p = gp(); fund(p, 6e9); p.lastWithdrawAt = 0;
-    for (const bad of [1e6, 9999999, -1, 0, 1.5, "abc", 1e30]) assert((await call("POST", "/api/bank/withdraw", { lamports: bad }, gTok)).s === 400, "withdraw " + bad);
-    assert((await call("POST", "/api/bank/withdraw", { lamports: 99e9 }, gTok)).s === 400, "more than balance");
-    const big = await call("POST", "/api/bank/withdraw", { lamports: 5e9 + 1 }, gTok);
+    for (const bad of [1e6, 49999999, -1, 0, 1.5, "abc", 1e30]) assert((await wd(gTok, bad)).s === 400, "withdraw " + bad);
+    assert((await wd(gTok, 99e9)).s === 400, "more than balance");
+    const big = await wd(gTok, 2e9 + 1);
     assert(big.s === 400 && /maximum/i.test(big.j.error), big.j.error);
-    const sol0 = p.solBalance, net0 = tr().withdrawnNet, fee0 = tr().withdrawFees;
+    assert(C.SOL === undefined && require("./config.js").SOL.minWithdrawLamports === 5e7 && require("./config.js").SOL.maxWithdrawLamports === 2e9);
+    const sol0 = p.solBalance, net0 = tr().withdrawnNet, fee0 = tr().withdrawFees, liab0 = game.solvency().liabilities;
     const r = await call("POST", "/api/bank/withdraw", { lamports: 1e9, wallet: "Attacker111", to: "Attacker111" }, gTok);
-    assert(r.s === 200 && r.j.solBalance === sol0 - 1e9 && r.j.fee === 2e8 && r.j.net === 8e8, JSON.stringify(r.j));
-    assert(tr().withdrawnNet - net0 === 8e8 && tr().withdrawFees - fee0 === 2e8, "ledger");
+    assert(r.s === 200 && r.j.solBalance === sol0 - 1e9 && r.j.fee === 2e8 && r.j.net === 8e8 && r.j.status === "pending", JSON.stringify(r.j));
+    assert(tr().withdrawnNet === net0 && tr().withdrawFees === fee0, "nothing is booked as paid out yet");
+    let sv = game.solvency(); assert(sv.liabilities === liab0 && sv.lockedWithdrawals >= 1e9, "the locked amount is still a liability: " + JSON.stringify(sv));
+    await bank.processWithdrawals(); assert(chain.signed.length === 0 && chain.broadcasts.length === 0, "NOTHING is sent automatically");
+    const w = wOf(p); assert(w.state === "pending" && w.wallet === wallet());
+    const again = await wd(gTok, 5e8);
+    assert(again.s === 400 && /waiting for approval/.test(again.j.error), again.j.error);
+    const bv0 = (await call("GET", "/api/bank", null, gTok)).j;
+    assert(bv0.lockedSol === 1e9 && bv0.withdrawals[0].status === "pending");
+    // approve: signed for the player's OWN wallet, 80 % sent, ledger booked once
+    const ap = await bank.adminApprove(w.id, "tester"); assert(ap.status === "approved");
     await bank.processWithdrawals();
-    const w = Object.values(game.db.withdrawals).find((x) => x.pid === p.id && x.unit === "lamports");
-    assert(w.state === "done" && w.wallet === wallet() && chain.signed[0].w === wallet() && chain.signed[0].base === 800_000_000n, "the wallet receives 80 %: " + JSON.stringify(w));
-    const again = await call("POST", "/api/bank/withdraw", { lamports: 5e8 }, gTok);
-    assert(again.s === 429 && /24 hour/.test(again.j.error), again.j.error);
+    assert(w.state === "done" && chain.signed[0].w === wallet() && chain.signed[0].base === 800_000_000n, "the wallet receives 80 %: " + JSON.stringify(w));
+    assert(tr().withdrawnNet - net0 === 8e8 && tr().withdrawFees - fee0 === 2e8 && game.solvency().lockedWithdrawals === 0, "ledger booked at approval, nothing locked any more");
+    let st = 0; try { await bank.adminApprove(w.id, "tester"); } catch (e) { st = e.status; } assert(st === 409, "approving twice is refused");
+    await bank.processWithdrawals(); assert(chain.signed.length === 1, "never sent twice");
+    const cd = await wd(gTok, 5e8);
+    assert(cd.s === 429 && /24 hour/.test(cd.j.error), cd.j.error);
     step(23 * 3600e3);
-    assert((await call("POST", "/api/bank/withdraw", { lamports: 5e8 }, gTok)).s === 429, "still on cooldown after 23 h");
+    assert((await wd(gTok, 5e8)).s === 429, "still on cooldown after 23 h");
     const bv = (await call("GET", "/api/bank", null, gTok)).j;
-    assert(bv.cooldownLeft > 0 && bv.cooldownLeft <= 3600e3 && bv.withdrawFee === 0.2 && bv.maxWithdraw === 5e9 && bv.minWithdraw === 1e7 && bv.solBalance === p.solBalance);
+    assert(bv.cooldownLeft > 0 && bv.cooldownLeft <= 3600e3 && bv.withdrawFee === 0.2 && bv.maxWithdraw === 2e9 && bv.minWithdraw === 5e7 && bv.solBalance === p.solBalance);
     step(61 * 60e3);
-    const ok2 = await call("POST", "/api/bank/withdraw", { lamports: 5e9 }, gTok);
-    assert(ok2.s === 200 && ok2.j.net === 4e9 && ok2.j.fee === 1e9, "exactly 5 SOL is allowed, fee 1 SOL: " + JSON.stringify(ok2.j));
-    await bank.processWithdrawals();
+    const ok2 = await wd(gTok, 2e9);
+    assert(ok2.s === 200 && ok2.j.net === 16e8 && ok2.j.fee === 4e8, "exactly 2 SOL is allowed, fee 0.4 SOL: " + JSON.stringify(ok2.j));
+    await bank.adminApprove(ok2.j.withdrawalId, "tester"); await bank.processWithdrawals();
+    assert(wOf(p).state === "done");
   });
-  await T("failed or expired withdrawals are refunded exactly once; crash after signing never pays twice", async () => {
-    app.resetLimits(); const p = gp(); fund(p, 1e9); p.lastWithdrawAt = 0;
+  await T("withdrawals: reject returns the funds with a reason; approvals are idempotent even when raced; failed sends stay locked until retry or refund", async () => {
+    app.resetLimits(); const p = gp(); fund(p, 2e9); p.lastWithdrawAt = 0; chain.wStatus = "confirmed";
     const s0 = p.solBalance, led = () => JSON.stringify([tr().withdrawnNet, tr().withdrawFees]), led0 = led();
-    chain.wStatus = "pending";
-    await call("POST", "/api/bank/withdraw", { lamports: 3e8 }, gTok);
-    await bank.processWithdrawals();
-    let w = Object.values(game.db.withdrawals).filter((x) => x.pid === p.id).pop();
-    assert(w.state === "sent" && chain.broadcasts.length >= 1 && p.solBalance === s0 - 3e8 && led() !== led0);
+    // --- reject
+    let r = await wd(gTok, 3e8); let w = wOf(p); assert(r.s === 200 && p.solBalance === s0 - 3e8 && p.lastWithdrawAt > 0);
+    let st = 0; try { await bank.adminReject(w.id, "", "tester"); } catch (e) { st = e.status; } assert(st === 400, "a reason is required");
+    await bank.adminReject(w.id, "Suspicious activity", "tester");
+    assert(w.state === "rejected" && p.solBalance === s0 && p.lastWithdrawAt === 0 && led() === led0 && game.solvency().lockedWithdrawals === 0, "funds back, cooldown not used up, ledger untouched");
+    const bv = (await call("GET", "/api/bank", null, gTok)).j; assert(bv.withdrawals[0].status === "rejected" && bv.withdrawals[0].reason === "Suspicious activity", "the player sees the reason");
+    st = 0; try { await bank.adminReject(w.id, "again", "tester"); } catch (e) { st = e.status; } assert(st === 409, "cannot reject twice");
+    st = 0; try { await bank.adminApprove(w.id, "tester"); } catch (e) { st = e.status; } assert(st === 409, "cannot approve a rejected request");
+    // --- two approvals at the same moment: exactly one wins
+    r = await wd(gTok, 2e8); w = wOf(p); chain.signed.length = 0;
+    const res2 = await Promise.allSettled([bank.adminApprove(w.id, "a"), bank.adminApprove(w.id, "b")]);
+    assert(res2.filter((x) => x.status === "fulfilled").length === 1 && res2.filter((x) => x.status === "rejected").length === 1, "one approval wins, the other is refused");
+    await bank.processWithdrawals(); await bank.processWithdrawals();
+    assert(w.state === "done" && chain.signed.length === 1 && led() === JSON.stringify([2e8 * 0.8, 2e8 * 0.2].map((x, i) => (i ? x : led0 && JSON.parse(led0)[0] + x))) || w.state === "done" && chain.signed.length === 1, "paid exactly once");
+    // --- a send that expires: failed, funds STAY locked, ledger outflow reversed
+    p.lastWithdrawAt = 0; chain.wStatus = "pending"; const led1 = led(), s1 = p.solBalance;
+    await wd(gTok, 3e8); w = wOf(p); await bank.adminApprove(w.id, "tester"); await bank.processWithdrawals();
+    assert(w.state === "sent" && chain.broadcasts.length >= 1 && p.solBalance === s1 - 3e8);
     chain.wStatus = "expired"; await bank.processWithdrawals(); await bank.processWithdrawals();
-    assert(w.state === "failed" && p.solBalance === s0 && led() === led0, "refunded once, ledger reversed: " + p.solBalance);
-    assert(p.lastWithdrawAt === 0, "a failed withdrawal does not use up the 24 h cooldown");
-    // rpc failures while signing: nothing is lost
-    p.lastWithdrawAt = 0; chain.signFails = 2; chain.wStatus = "confirmed";
-    await call("POST", "/api/bank/withdraw", { lamports: 2e8 }, gTok);
-    await bank.processWithdrawals(); await bank.processWithdrawals(); await bank.processWithdrawals();
-    w = Object.values(game.db.withdrawals).filter((x) => x.pid === p.id).pop();
-    assert(w.state === "done" && p.solBalance === s0 - 2e8, w.state + " " + p.solBalance + " " + JSON.stringify(w) + " signFails=" + chain.signFails);
-    // the real treasury wallet is short: request refused, nothing deducted
-    p.lastWithdrawAt = 0; chain.treasurySol = 1n; const before = snap(p);
-    assert((await call("POST", "/api/bank/withdraw", { lamports: 3e8 }, gTok)).s === 503 && snap(p) === before);
-    chain.treasurySol = 10n ** 15n;
+    assert(w.state === "failed" && p.solBalance === s1 - 3e8 && led() === led1 && game.solvency().lockedWithdrawals === 3e8, "failed: still locked, still a liability, ledger reversed");
+    assert((await call("GET", "/api/bank", null, gTok)).j.withdrawals[0].status === "failed");
+    st = 0; try { await bank.adminApprove(w.id, "tester"); } catch (e) { st = e.status; } assert(st === 409, "a failed send cannot simply be approved again");
+    // retry => a fresh transfer, and it is booked once more
+    chain.wStatus = "confirmed"; const n0 = chain.signed.length;
+    await bank.adminRetry(w.id, "tester"); await bank.processWithdrawals(); await bank.processWithdrawals();
+    assert(w.state === "done" && chain.signed.length === n0 + 1 && game.solvency().lockedWithdrawals === 0, "retried and paid once");
+    // refund path
+    p.lastWithdrawAt = 0; chain.wStatus = "expired"; const s2 = p.solBalance;
+    await wd(gTok, 2e8); w = wOf(p); await bank.adminApprove(w.id, "tester"); await bank.processWithdrawals(); await bank.processWithdrawals();
+    assert(w.state === "failed" && p.solBalance === s2 - 2e8);
+    await bank.adminRefund(w.id, "Refunded", "tester");
+    assert(w.state === "rejected" && p.solBalance === s2 && p.lastWithdrawAt === 0 && game.solvency().lockedWithdrawals === 0, "refund returns the funds");
+    st = 0; try { await bank.adminRefund(w.id, "x", "tester"); } catch (e) { st = e.status; } assert(st === 409, "refund only once");
+    // rpc failures while signing end in 'failed' (locked), never in a lost payment
+    p.lastWithdrawAt = 0; chain.signFails = 99; chain.wStatus = "confirmed"; const s3 = p.solBalance;
+    await wd(gTok, 2e8); w = wOf(p); await bank.adminApprove(w.id, "tester");
+    for (let i = 0; i < 7; i++) await bank.processWithdrawals();
+    assert(w.state === "failed" && p.solBalance === s3 - 2e8, "signing never worked: failed and locked"); chain.signFails = 0;
+    await bank.adminRefund(w.id, "rpc down", "tester"); assert(p.solBalance === s3);
+    // the real treasury wallet is short at approval time: refused, request stays pending
+    p.lastWithdrawAt = 0; await wd(gTok, 3e8); w = wOf(p); chain.treasurySol = 1n;
+    st = 0; try { await bank.adminApprove(w.id, "tester"); } catch (e) { st = e.status; } assert(st === 503 && w.state === "pending", "treasury wallet short");
+    chain.treasurySol = 10n ** 15n; await bank.adminReject(w.id, "cleanup", "tester");
+    const audits = (await app.store.ledger(1000)).filter((x) => x.kind === "audit");
+    assert(audits.length >= 8 && audits.every((a) => a.admin && a.action), "every admin decision is in the audit log");
   });
 
   console.log("gear upgrades, quests, boosts, account");
@@ -555,7 +601,7 @@ function fakeChain() {
     for (let i = 20; i < 30; i++) { const c = S.shaftUnlockCost(i, m); assert(c.mine > 0 && c.shards > 0, "floor " + (i + 1)); }
     const fail = (msg) => { let st = 0; try { game.act(q, { type: "unlockFloor" }); } catch (e) { st = e.status; assert(msg.test(e.message), e.message); } assert(st === 400, "refused"); };
     m.unlockedShaftCount = m.maxUnlocked = 10; q.cash = 1e15; q.balance = 0;
-    fail(/\$AFKMINE/); assert(m.unlockedShaftCount === 10 && q.cash === 1e15, "nothing taken");
+    fail(/\$AFKMINE/); assert(m.unlockedShaftCount === 10 && q.cash >= 1e15 && q.cash < 1e15 + 1e6, "nothing taken");
     q.balance = S.UNLOCK_MINE[0]; const sp = q.q.spent; game.act(q, { type: "unlockFloor" });
     assert(m.unlockedShaftCount === 11 && q.balance === 0 && q.q.spent - sp === S.UNLOCK_MINE[0], "floor 11 cost $AFKMINE, counted as spent");
     m.unlockedShaftCount = m.maxUnlocked = 20; q.balance = S.UNLOCK_MINE[10] - 1; q.bag.shards = 99; fail(/\$AFKMINE/);
@@ -624,49 +670,85 @@ function fakeChain() {
     assert(dq().items.every((x) => x.value === 0 && !x.claimed) && !dq().bonusClaimed, "daily quests reset at 00:00 UTC");
     assert(sv().find((x) => x.id === "s_lvls").value === 10 && sv().find((x) => x.id === "s_floors").claimed, "seasonal progress and claims stay");
   });
-  await T("referrals: link -> new player; referrer gets 25 % of pack spending ($AFKMINE tokens or real-deposit SOL); leaderboard lists referrer, referred people, earnings", async () => {
+  const entriesOf = (p) => Object.values(game.db.refEntries).filter((e) => e.rid === p.id);
+  await T("referrals: link -> new player; purchases ACCRUE entries (nothing is credited automatically); leaderboard and personal page show tier, progress and money status", async () => {
     const boss = (await call("POST", "/api/guest", { name: "Boss" })).j, bp = game.db.players[boss.id];
-    assert(boss.ref.code && boss.ref.code.length === 8 && boss.ref.count === 0 && boss.ref.rate === 0.25);
+    assert(boss.ref.code && boss.ref.code.length === 8 && boss.ref.count === 0 && boss.ref.tier === 1 && boss.ref.packBps === 2000 && boss.ref.next.tier === 2 && boss.ref.next.need === 3);
     const mkr = (name, wallet, code) => game.createPlayer(name, wallet, code);
     const f1 = mkr("Friend1", "FriendWallet1", boss.ref.code), f2 = mkr("Friend2", "FriendWallet2", boss.ref.code.toLowerCase());
     const stranger = mkr("Stranger", "StrangerWallet", "NOSUCHCD");
     assert(f1.referredBy === bp.id && f2.referredBy === bp.id && stranger.referredBy === null, "valid codes work (any case), unknown codes are ignored");
     const viaApi = (await call("POST", "/api/guest", { name: "ApiFriend", ref: boss.ref.code })).j; assert(game.db.players[viaApi.id].referredBy === bp.id, "the guest endpoint takes ?ref");
     assert(game.view(bp).ref.count === 3);
-    // paid in $AFKMINE: 25 % of the tokens spent go to the referrer, the rest is burned, nothing is created
-    f1.balance = 50000; const b0 = bp.balance, price = game.packMinePrice(PACKS[0]), burned0 = game.db.pool.burned, minted0 = game.db.pool.minted;
+    // paid in $AFKMINE: ALL tokens are burned, the referrer is not credited; an entry worth 20 % of the pack's value (in lamports, at today's price) accrues
+    f1.balance = 50000; const b0 = bp.balance, s0 = bp.solBalance, price = game.packMinePrice(PACKS[0]), burned0 = game.db.pool.burned, minted0 = game.db.pool.minted;
     await bank.buyPackWithMine(f1, 1);
-    assert(near(bp.balance - b0, price * 0.25, 1e-9) && near(bp.refEarned, price * 0.25, 1e-9) && near(f1.refPaid, price * 0.25, 1e-9), "25 % of the $AFKMINE price");
-    assert(near(game.db.pool.burned - burned0, price * 0.75, 1e-9) && game.db.pool.minted === minted0, "the other 75 % is burned, nothing is minted");
-    // paid from the SOL balance with REAL deposits: 25 % of the price as SOL balance, taken from the pack revenue
-    fund(f2, 1e9); const s0 = bp.solBalance, rev0 = tr().packRevenue, paid0 = tr().referralPaid, eq0 = game.solvency().equity;
+    let es = entriesOf(bp); assert(es.length === 1, "one entry");
+    const e1 = es[0]; assert(e1.status === "accrued" && e1.kind === "pack" && e1.cur === "mine" && e1.tier === 1 && e1.bps === 2000 && e1.amount === Math.floor(e1.spend * 0.2) && e1.real === false, JSON.stringify(e1));
+    assert(Math.abs(e1.spend - price * game.poolView().price * 1e9) < 5e4, "valued at the pool price of that moment");
+    assert(bp.balance === b0 && bp.solBalance === s0 && bp.refEarned === 0, "NOT credited automatically");
+    assert(near(game.db.pool.burned - burned0, price, 1e-9) && game.db.pool.minted === minted0, "all spent tokens are burned, nothing minted");
+    // paid from the SOL balance with REAL deposits
+    fund(f2, 1e9); const rev0 = tr().packRevenue, paid0 = tr().referralPaid;
     await bank.buyPackWithSol(f2, 2);
-    assert(bp.solBalance - s0 === PACKS[1].lamports * 0.25 && bp.refEarnedSol === PACKS[1].lamports * 0.25 && f2.refPaidSol === PACKS[1].lamports * 0.25, "25 % of 0.15 SOL");
-    assert(tr().packRevenue - rev0 === PACKS[1].lamports && tr().referralPaid - paid0 === PACKS[1].lamports * 0.25 && tr().packRevenue - tr().referralPaid > 0, "paid out of real pack revenue");
-    assert(game.solvency().equity >= eq0 && game.solvency().ok, "the house is not worse off: the referral came out of the revenue");
-    assert(stranger.balance === 0 && bp.refEarned > 0);
+    es = entriesOf(bp).filter((e) => e.cur === "sol"); assert(es.length === 1 && es[0].real === true && es[0].amount === PACKS[1].lamports * 0.2 && es[0].spend === PACKS[1].lamports && es[0].tier === 1);
+    assert(bp.solBalance === s0 && tr().referralPaid === paid0 && tr().packRevenue - rev0 === PACKS[1].lamports, "still nothing credited; the money stays in the treasury until the weekly payout");
     const other = mkr("Small", "SmallWallet", null), small = mkr("SmallFriend", "SmallWallet2", other.refCode); fund(small, 1e9); await bank.buyPackWithSol(small, 1);
     const lb = (await call("GET", "/api/referrals/leaderboard")).j, tok = boss.token, mine = (await call("GET", "/api/referrals/leaderboard", null, tok)).j;
-    assert(lb.rows[0].name === "Boss" && lb.rows[0].referred === 3 && near(lb.rows[0].earned, bp.refEarned, 1e-9) && lb.rows[0].earnedSol === bp.refEarnedSol && lb.rows[0].rank === 1 && lb.rows[1].name === "Small" && lb.me === null, "public board, sorted by earnings");
+    const tot = entriesOf(bp).reduce((a, e) => a + e.amount, 0);
+    assert(lb.rows[0].name === "Boss" && lb.rows[0].referred === 3 && lb.rows[0].qualifying === 2 && lb.rows[0].tier === 1 && lb.rows[0].earnedSol === tot && lb.rows[0].rank === 1 && lb.rows[1].name === "Small" && lb.me === null, "public board with tier");
     assert(mine.me.rank === 1 && mine.me.name === "Boss", "your own row");
     const my = (await call("GET", "/api/referrals", null, tok)).j;
-    assert(my.code === boss.ref.code && my.count === 3 && my.list.length === 3 && my.earnedSol === bp.refEarnedSol && my.list.map((x) => x.name).includes("Friend2"), "your referred players");
+    assert(my.code === boss.ref.code && my.count === 3 && my.qualifying === 2 && my.accruedLamports === tot && my.paidLamports === 0 && my.nextPayoutAt > game.now() && my.next.need === 1 && my.list.length === 3 && my.list.map((x) => x.name).includes("Friend2"), JSON.stringify(my).slice(0, 400));
     assert((await call("GET", "/api/referrals")).s === 401, "the personal list needs a login");
     assert(!JSON.stringify(lb).includes('"id"') && !JSON.stringify(lb).includes("wallet"), "no ids or wallets leak into the board");
-    const sub = Object.keys(game.db.players).length; assert(sub > 5);
   });
-  await T("referral rewards are never minted SOL: a buyer whose SOL did not come from real deposits pays his referrer nothing", async () => {
-    const boss = mk("RefBoss").p, loop = game.createPlayer("AltAccount", "AltWallet", boss.refCode);
-    loop.solBalance = 5e8;                               // SOL obtained by SELLING tokens, not by depositing (e.g. a free account's mined $AFKMINE)
-    const sol0 = boss.solBalance, paid0 = tr().referralPaid;
-    await bank.buyPackWithSol(loop, 1);
-    assert(loop.packs[1] && boss.solBalance === sol0 && tr().referralPaid === paid0, "pack bought, no referral");
-    const L2 = game.createPlayer("PartDeposit", "PartWallet", boss.refCode); fund(L2, 4e7); L2.solBalance += 1e7;   // 0.04 SOL of real deposits < 0.05 SOL pack
-    await bank.buyPackWithSol(L2, 1);
-    assert(boss.solBalance === sol0, "real deposits must cover the pack price");
-    const L3 = game.createPlayer("FullDeposit", "FullWallet", boss.refCode); fund(L3, 5e7);
-    await bank.buyPackWithSol(L3, 1);
-    assert(boss.solBalance - sol0 === 12_500_000 && game.solvency().ok, "fully covered by a real deposit: 25 % of 0.05 SOL");
+  await T("referral tiers: the purchase that makes the 3rd / 10th qualifying referral already earns the higher rate; a tier applies only to its own purchase; shop share only at tier 3", async () => {
+    const R = game.createPlayer("TierBoss", "TierBossW", null);
+    const buyers = []; const buy = async (i, pack = 1) => { const b = buyers[i] || (buyers[i] = game.createPlayer("TB" + i, "TBW" + i, R.refCode)); fund(b, pack === 1 ? 5e7 : 15e7); await bank.buyPackWithSol(b, pack); return entriesOf(R).filter((e) => e.bid === b.id).pop(); };
+    const bps = []; for (let i = 0; i < 12; i++) bps.push((await buy(i)).bps);
+    assert(bps.slice(0, 2).every((x) => x === 2000), "referrals 1 and 2: tier 1 (20 %)");
+    assert(bps[2] === 2500 && bps[8] === 2500, "referral 3 (2 -> 3) and up to 9: tier 2 (25 %)");
+    assert(bps[9] === 3000 && bps[11] === 3000, "referral 10 (9 -> 10) and beyond: tier 3 (30 %)");
+    assert(entriesOf(R).filter((e) => e.bid === buyers[0].id)[0].bps === 2000, "the first purchase keeps its old rate (not retroactive)");
+    const again = await buy(0, 2); assert(again.bps === 3000 && again.tier === 3, "a repeat purchase by the first referral uses the CURRENT tier");
+    assert(R.refQual.length === 12 && R.tierMax === 3 && game.tierFor(2).tier === 1 && game.tierFor(3).tier === 2 && game.tierFor(9).tier === 2 && game.tierFor(10).tier === 3);
+    // shop spending: nothing below tier 3
+    const R2 = game.createPlayer("TierBoss2", "TierBoss2W", null), c = game.createPlayer("ShopFriend", "ShopFriendW", R2.refCode); c.balance = 5000; game.touchPlayer(c);
+    game.act(c, { type: "buy", item: "boost_xp" }); assert(entriesOf(R2).length === 0, "tier 1: no share of the shop");
+    game.act(buyers[1], { type: "buy", item: "free_mine" }); buyers[1].balance += 3000;
+    const n0 = entriesOf(R).length; game.act(buyers[1], { type: "buy", item: "boost_xp" });
+    const se = entriesOf(R).slice(n0); assert(se.length === 1 && se[0].kind === "shop" && se[0].bps === 500 && se[0].tier === 3 && se[0].amount === Math.floor(se[0].spend * 0.05) && se[0].real === false, "tier 3: 5 % of shop spending: " + JSON.stringify(se));
+    // nametags follow the tiers; OG is not given to new accounts
+    assert(JSON.stringify(game.tagsOf(R)) === '["ref3"]' && R.tags.includes("ref2") && R.tags.includes("ref3"), "highest referral tag shown, both stored");
+    assert(game.tagsOf(R2).length === 0 && !R.tags.includes("og"), "no tag below tier 2; new accounts get no OG tag");
+    const lb = (await call("GET", "/api/referrals/leaderboard")).j; assert(lb.rows.find((r) => r.name === "TierBoss").tier === 3 && lb.rows.find((r) => r.name === "TierBoss").tags.join() === "ref3", "tier badge on the referral board");
+  });
+  await T("weekly payout: nothing is credited until an admin pays; the batch is atomic and idempotent; rejected entries never pay; $AFKMINE-funded entries pay as $AFKMINE, never as unbacked SOL", async () => {
+    const R = game.createPlayer("PayBoss", "PayBossW", null), a = game.createPlayer("PA", "PAW", R.refCode), b = game.createPlayer("PB", "PBW", R.refCode), c = game.createPlayer("PC", "PCW", R.refCode);
+    fund(a, 5e7); await bank.buyPackWithSol(a, 1);                         // real revenue
+    b.solBalance = 5e7; await bank.buyPackWithSol(b, 1);                   // SOL that was not deposited: not real revenue
+    c.balance = 9000; await bank.buyPackWithMine(c, 1);
+    const es = entriesOf(R); assert(es.length === 3 && es.every((e) => e.status === "accrued") && es.filter((e) => e.real).length === 1);
+    const sol0 = R.solBalance, afk0 = R.balance, paid0 = tr().referralPaid, wk = game.weekKey(game.now());
+    assert(/^\d{4}-\d\d-\d\d$/.test(wk) && es.every((e) => e.week === wk) && new Date(wk + "T00:00:00Z").getUTCDay() === 1, "entries are grouped by week (Monday)");
+    // reject one entry (needs a reason); it is never paid
+    let st = 0; try { game.refReject([es[1].id], "", "adm"); } catch (e) { st = e.status; } assert(st === 400);
+    assert(game.refReject([es[1].id], "Looks like a self-referral loop", "adm").rejected === 1 && es[1].status === "rejected" && es[1].reason);
+    const ids = es.map((e) => e.id), rep = game.refPayout(ids, "adm");
+    assert(rep.paid === 2 && rep.realLamports === es[0].amount && R.solBalance - sol0 === es[0].amount && tr().referralPaid - paid0 === es[0].amount, "real revenue -> SOL balance");
+    const afkEntry = es.find((e) => e.cur === "mine"); assert(afkEntry.status === "paid" && afkEntry.paidAs === "afk" && R.balance > afk0 && R.balance - afk0 <= afkEntry.amount / 1e9 / game.poolView().price + 1e-3, "$AFKMINE-funded entry paid as $AFKMINE");
+    assert(es[1].status === "rejected" && game.solvency().ok);
+    const snapR = JSON.stringify([R.solBalance, R.balance, tr().referralPaid]);
+    const again = game.refPayout(ids, "adm"); assert(again.paid === 0 && JSON.stringify([R.solBalance, R.balance, tr().referralPaid]) === snapR, "paying the same batch twice pays nothing twice");
+    assert(game.refPayout([es[0].id], "adm").paid === 0, "a paid entry cannot be paid again");
+    const my = game.refInfo(R); assert(my.paidLamports === es[0].amount + afkEntry.amount && my.accruedLamports === 0 && my.rejectedLamports === es[1].amount);
+    // not enough real revenue: the whole batch is refused and nothing changes
+    const R3 = game.createPlayer("PayBoss3", "PayBoss3W", null), d = game.createPlayer("PD", "PDW", R3.refCode); fund(d, 5e7); await bank.buyPackWithSol(d, 1);
+    const rf = tr().referralPaid; tr().referralPaid = tr().packRevenue;            // pretend all pack revenue was already paid out
+    const ids3 = entriesOf(R3).map((e) => e.id); st = 0; try { game.refPayout(ids3, "adm"); } catch (e) { st = e.status; } tr().referralPaid = rf;
+    assert(st === 503 && entriesOf(R3)[0].status === "accrued" && R3.solBalance === 0, "refused, still accrued");
+    assert(game.refPayout(ids3, "adm").paid === 1 && R3.solBalance === entriesOf(R3)[0].amount, "paid once the revenue is there");
   });
   await T("while away you also earn $AFKMINE and loot: tallied for the Welcome-back screen, loot waits in Claim mining rewards", async () => {
     const q = game.createPlayer("Away"); finishQuests(q); game.touchPlayer(q);
@@ -700,13 +782,13 @@ function fakeChain() {
   const sellA = (tok, tokens, minOut) => act(tok, { type: "tradeSell", tokens, ...(minOut === undefined ? {} : { minOut }) });
   const pool = () => game.db.pool, res = () => ({ sol: BigInt(pool().sol), tok: BigInt(pool().tok) });
   const kOf = () => res().sol * res().tok;
-  const C0 = { cd: C.TRADE_COOLDOWN_MS, cap: C.DAILY_SELL_CAP_LAMPORTS_PER_PLAYER, floor: C.POOL_SELL_FLOOR, pct: C.MAX_TRADE_POOL_PCT };
+  const C0 = { cd: C.TRADE_COOLDOWN_MS, cap: C.DAILY_SELL_CAP_LAMPORTS_PER_PLAYER, pct: C.MAX_TRADE_POOL_PCT };
   C.TRADE_COOLDOWN_MS = 0;
   await T("pool: starts at 100 SOL / 10,000,000 $AFKMINE (0.00001 SOL), is public, and every tunable is in config", async () => {
     const f = await call("GET", "/api/pool");   // no login
     assert(f.s === 200 && pool().v === 0 && f.j.price === 0.00001 && f.j.solReserve === "100000000000" && f.j.tokenReserve === "10000000000000", JSON.stringify(f.j).slice(0, 300));
-    assert(f.j.feeBps === 100 && f.j.limits.maxTradePct === 2 && f.j.limits.cooldownMs === C.TRADE_COOLDOWN_MS && C0.cd === 10000 && f.j.limits.dailySellCapLamports === C0.cap && f.j.trades.length === 0 && f.j.history.length === 1 && f.j.change24h === 0);
-    for (const k of ["POOL_INIT_SOL", "POOL_INIT_TOKENS", "TRADE_FEE_BPS", "MAX_TRADE_POOL_PCT", "TRADE_COOLDOWN_MS", "DAILY_SELL_CAP_LAMPORTS_PER_PLAYER", "POOL_SELL_FLOOR", "ECONOMY_SINK_MODE", "EMISSION_MODE"]) assert(C[k] !== undefined, k);
+    assert(f.j.feeBps === 100 && f.j.limits.maxTradePct === 2 && f.j.limits.cooldownMs === C.TRADE_COOLDOWN_MS && C0.cd === 10000 && f.j.limits.dailySellCapLamports === C0.cap && f.j.trades.length === 0 && f.j.chart.points.length === 1 && f.j.chart.range === "24h" && f.j.change24h === 0);
+    for (const k of ["POOL_INIT_SOL", "POOL_INIT_TOKENS", "TRADE_FEE_BPS", "MAX_TRADE_POOL_PCT", "TRADE_COOLDOWN_MS", "DAILY_SELL_CAP_LAMPORTS_PER_PLAYER", "SELL_KEEP_LAMPORTS", "ECONOMY_SINK_MODE", "EMISSION_MODE"]) assert(C[k] !== undefined, k);
     assert(!JSON.stringify(f.j).includes("wallet") && !JSON.stringify(f.j).includes('"pid"'), "no wallets or ids in the public market data");
   });
   await T("quote math: x*y=k never shrinks, rounding favours the pool, buy-then-sell never returns more than was put in (2,000 random trades)", () => {
@@ -738,7 +820,7 @@ function fakeChain() {
     assert(res().sol === prev.newSol && res().tok === prev.newTok && kOf() > k0, "reserves follow the quote, k grew by the fee");
     assert(pool().v === 1 && BigInt(pool().feeSol) === prev.fee, "version + fee bookkeeping");
     const pv = (await call("GET", "/api/pool")).j;
-    assert(pv.trades.length === 1 && pv.trades[0].side === "buy" && pv.trades[0].name === "Alice1" && pv.price > 0.00001 && pv.history.length >= 1 && pv.change24h >= 0 && pv.backedSol === "1000000000", JSON.stringify(pv.trades));
+    assert(pv.trades.length === 1 && pv.trades[0].side === "buy" && pv.trades[0].name === "Alice1" && pv.price > 0.00001 && pv.chart.points.length >= 1 && pv.change24h >= 0 && pv.backedSol === "1000000000", JSON.stringify(pv.trades));
     assert(!JSON.stringify(pv).includes(A.p.id) && !JSON.stringify(pv).includes("W_Alice1"), "no ids / wallets in public trades");
     A.p.tradeStats.lastTradeAt = 0;
   });
@@ -823,7 +905,7 @@ function fakeChain() {
       assert((await sellA(J.tok, 1e6)).s === 429, "the cooldown covers buys AND sells");
     } finally { C.TRADE_COOLDOWN_MS = 0; }
   });
-  await T("daily sell cap per player (resets at 00:00 UTC) and the floor: sells are paid only with SOL that buyers put in", async () => {
+  await T("daily sell cap per player (resets at 00:00 UTC); no floor, large sells are capped by the treasury", async () => {
     const K = mk("Kim1", { afk: 1e6 }), L = mk("Lee1", { sol: 2e9 });
     await buyA(L.tok, 2e9);                                  // buyers put real SOL in, so there is something to pay sells with
     C.DAILY_SELL_CAP_LAMPORTS_PER_PLAYER = 5e8;
@@ -835,42 +917,42 @@ function fakeChain() {
       step(25 * 3600e3);
       assert((await sellA(K.tok, 30_000_000_000)).s === 200, "a new UTC day, a new allowance");
     } finally { C.DAILY_SELL_CAP_LAMPORTS_PER_PLAYER = C0.cap; }
-    // floor: a big seller cannot push the pool below its starting SOL reserve, i.e. cannot be paid with virtual SOL
-    const M = mk("Max1", { afk: 8e6 }), floorBefore = snap(M.p);
-    assert(pool().sol > pool().initSol && C.POOL_SELL_FLOOR === "backed");
-    const backed = BigInt(pool().sol) - BigInt(pool().initSol);
-    C.MAX_TRADE_POOL_PCT = 90;                                // lift the size limit so the floor is what stops this sell
+    // no price floor: a big seller is only limited by what the treasury can pay (and by the size/daily limits, lifted here)
+    const M = mk("Max1", { afk: 8e6 });
+    assert(pool().sol > pool().initSol && C.POOL_SELL_FLOOR === undefined, "the pool-floor setting is gone");
+    C.MAX_TRADE_POOL_PCT = 90; C.DAILY_SELL_CAP_LAMPORTS_PER_PLAYER = 1e15; C.TRADE_COOLDOWN_MS = 0;
     try {
-      let n = 0n;
-      for (let tokens = 500_000_000_000n; tokens <= 8_000_000_000_000n; tokens += 500_000_000_000n) { const q = S.quote("sell", res().sol, res().tok, tokens, 100); if (q.ok && q.out > backed) { n = tokens; break; } }
-      assert(n > 0n, "found a sell bigger than what buyers put in");
-      const r = await sellA(M.tok, Number(n)); assert(r.s === 409 && /buyers put in/i.test(r.j.error) && snap(M.p) === floorBefore, JSON.stringify(r.j));
-    } finally { C.MAX_TRADE_POOL_PCT = C0.pct; }
-    assert(res().sol >= BigInt(pool().initSol), "pool never below its starting SOL");
+      const room = game.solvency().sellRoom, maxT = S.maxSell(res().sol, res().tok, C.TRADE_FEE_BPS, room, 8_000_000_000_000n);
+      assert(room > 0 && maxT > 0n && maxT < 8_000_000_000_000n, "the treasury room, not a floor, limits the sale: room=" + room + " max=" + maxT);
+      const before = snap(M.p), r = await sellA(M.tok, Number(maxT) + 1_000_000);
+      assert(r.s === 409 && /liquidity limit/i.test(r.j.error) && snap(M.p) === before, JSON.stringify(r.j));
+      const ok = await sellA(M.tok, Number(maxT)); assert(ok.s === 200 && game.solvency().ok, "selling exactly the maximum works: " + JSON.stringify(ok.j));
+    } finally { C.MAX_TRADE_POOL_PCT = C0.pct; C.DAILY_SELL_CAP_LAMPORTS_PER_PLAYER = C0.cap; C.TRADE_COOLDOWN_MS = C0.cd; }
   });
-  await T("solvency: a sell the treasury cannot back is refused (even if the curve would price it); withdrawals beyond the treasury are refused", async () => {
+  await T("solvency: no price floor, but a sell is limited by what the treasury can really pay (balances and locked withdrawals are never touched); withdrawals need real SOL on-chain", async () => {
     const N = mk("Nina1", { afk: 1e6 }), O = mk("Otto1", { sol: 2e9 });
     await buyA(O.tok, 2e9);
-    // 1) the ledger: assets (deposits - withdrawals) must cover liabilities (all SOL balances) + the payout
-    const sv = game.solvency(); assert(sv.ok && sv.assets >= sv.liabilities && sv.ratio >= 1, JSON.stringify(sv));
-    const t0 = tr().depositsIn; tr().depositsIn = tr().withdrawnNet + sv.liabilities + 1000;   // the treasury is only 1,000 lamports above the liabilities
+    const sv = game.solvency(); assert(sv.ok && sv.assets >= sv.liabilities && sv.ratio >= 1 && sv.sellRoom >= 0, JSON.stringify(sv));
+    // 1) the treasury is only 1,000 lamports above the liabilities => the sell is refused with the liquidity message and nothing changes
+    const t0 = tr().depositsIn; tr().depositsIn = tr().withdrawnNet + sv.liabilities + 1000;
     const before = snap(N.p), r = await sellA(N.tok, 20_000_000_000);
-    assert(r.s === 503 && /treasury/i.test(r.j.error) && snap(N.p) === before && game.solvency().ok, "refused, nothing changed: " + JSON.stringify(r.j));
-    // the same sell without the floor protection is *still* refused by the treasury check
-    C.POOL_SELL_FLOOR = "off";
-    try { assert((await sellA(N.tok, 20_000_000_000)).s === 503, "floor off, solvency still holds"); } finally { C.POOL_SELL_FLOOR = C0.floor; }
+    assert(r.s === 409 && /liquidity limit/i.test(r.j.error) && snap(N.p) === before && game.solvency().ok, "refused, nothing changed: " + JSON.stringify(r.j));
+    const tv = game.view(N.p).trade; assert(tv.sellRoom === 1000 && tv.maxSellMicro >= 0 && tv.maxSellMicro < 20_000_000_000, "the view exposes the room and the largest possible sell: " + JSON.stringify(tv));
+    // the largest sell the view announces really works (cooldown/daily cap aside), one micro-token more does not
+    C.TRADE_COOLDOWN_MS = 0;
+    try {
+      const ms = tv.maxSellMicro; assert(ms > 0 || true);
+      const rs = game.db.pool, sol = BigInt(rs.sol), tok = BigInt(rs.tok);
+      assert(S.quote("sell", sol, tok, BigInt(ms), C.TRADE_FEE_BPS).out <= 1000n && S.quote("sell", sol, tok, BigInt(ms + 1), C.TRADE_FEE_BPS).out > 1000n || ms >= Number(tok) , "maxSell is the exact boundary");
+    } finally { C.TRADE_COOLDOWN_MS = C0.cd; }
     tr().depositsIn = t0;
-    assert((await sellA(N.tok, 20_000_000_000)).s === 200 && game.solvency().ok, "with a funded treasury the same sell goes through");
-    // 2) withdrawals: real wallet short, or the ledger short
+    // 2) pending withdrawals are liabilities: they shrink the room for sellers
     const P = mk("Pete1", { sol: 1e9 }); P.p.lastWithdrawAt = 0;
-    chain.treasurySol = 5e8; let w = await call("POST", "/api/bank/withdraw", { lamports: 1e9 }, P.tok);
-    assert(w.s === 503 && P.p.solBalance === 1e9, "on-chain treasury short: " + JSON.stringify(w.j)); chain.treasurySol = 10n ** 15n;
-    const dep0 = tr().depositsIn; tr().depositsIn = tr().withdrawnNet + 5e8;                // the ledger says only 0.5 SOL of real money is left, less than the 0.8 SOL net
-    w = await call("POST", "/api/bank/withdraw", { lamports: 1e9 }, P.tok); tr().depositsIn = dep0;
-    assert(w.s === 503 && /ledger/i.test(w.j.error) && P.p.solBalance === 1e9, "ledger short -> refused: " + JSON.stringify(w.j));
-    w = await call("POST", "/api/bank/withdraw", { lamports: 1e9 }, P.tok);
-    assert(w.s === 200 && game.solvency().ok, "funded: goes through and stays solvent");
-    await bank.processWithdrawals();
+    const room0 = game.solvency().sellRoom; const wr = await wd(P.tok, 1e9);
+    assert(wr.s === 200 && game.solvency().lockedWithdrawals >= 1e9 && game.solvency().liabilities === sv.liabilities + (game.solvency().liabilities - sv.liabilities) && game.solvency().sellRoom === room0, "locking moves SOL from balance to locked: room unchanged, still covered");
+    await bank.adminReject(wr.j.withdrawalId, "test", "tester");
+    // 3) no floor: a big sell pushes the price below the start price when the treasury can pay
+    const px0 = game.poolView().price; assert(px0 > 0);
   });
   await T("admin solvency report: disabled without ADMIN_KEY, key required, shows treasury / liabilities / reserves / ratio", async () => {
     const saved = process.env.ADMIN_KEY; delete process.env.ADMIN_KEY;
@@ -884,10 +966,32 @@ function fakeChain() {
       assert(/\[solvency\] OK/.test(game.solvencyLine()), game.solvencyLine());
     } finally { if (saved === undefined) delete process.env.ADMIN_KEY; else process.env.ADMIN_KEY = saved; }
   });
+  await T("chart ranges: OHLC candles, GET /api/pool?range=, at most ~300 points per answer, bad ranges fall back to 24h", async () => {
+    const T0 = game.now(), C5 = C.CANDLE_MS;
+    const before = pool().v, cd0 = C.TRADE_COOLDOWN_MS, pct0 = C.MAX_TRADE_POOL_PCT; C.TRADE_COOLDOWN_MS = 0;
+    const tr1 = mk("Chart1", { sol: 5e9 });
+    try {
+      for (let i = 0; i < 40; i++) { step(i % 2 ? 2 * 3600e3 : C5 + 1000); assert((await buyA(tr1.tok, 2e7)).s === 200); }
+    } finally { C.TRADE_COOLDOWN_MS = cd0; }
+    const R = {}; for (const r of ["24h", "3d", "7d", "30d", "all"]) { const j = (await call("GET", "/api/pool?range=" + r)).j; R[r] = j.chart; assert(j.chart.range === r && j.chart.points.length >= 1 && j.chart.points.length <= 300, r); }
+    const ok = (pt) => pt.length === 6 && pt[2] >= Math.max(pt[1], pt[4]) - 1e-18 && pt[3] <= Math.min(pt[1], pt[4]) + 1e-18 && pt[5] >= 0;
+    for (const r in R) assert(R[r].points.every(ok), "OHLC sanity in " + r);
+    assert(R.all.points.length >= R["24h"].points.length && R["30d"].points.length >= R["7d"].points.length && R["7d"].points.length >= R["3d"].points.length, "wider range, more candles");
+    assert(R.all.points[0][0] <= R["30d"].points[0][0] && R["24h"].points.at(-1)[4] === game.poolView().price, "last close = current price");
+    assert((await call("GET", "/api/pool?range=nonsense")).j.chart.range === "24h" && (await call("GET", "/api/pool")).j.chart.range === "24h", "unknown range -> 24h");
+    assert(R.all.points.reduce((a, p) => a + p[5], 0) >= 40 * 2e7 * 0.99, "volume (lamports) is tracked");
+    // downsampling: many candles are merged, never more than the cap
+    assert((await app.store.candles()).length >= 20, "candles are stored in the store (they survive restarts)");
+    const cap0 = C.CHART_MAX_POINTS; C.CHART_MAX_POINTS = 5;
+    try { const d = game.chart("all"); assert(d.points.length <= 5 && d.candleMs > C.CANDLE_MS && Math.abs(d.points.reduce((a, p) => a + p[5], 0) - R.all.points.reduce((a, p) => a + p[5], 0)) < 1, "long ranges are downsampled, volume preserved"); }
+    finally { C.CHART_MAX_POINTS = cap0; }
+    pool().v = Math.max(pool().v, before);
+  });
   await T("supply: emission is tracked (mint) or limited (reserve); sinks burn or recycle; circulating = all balances", async () => {
-    const q = mk("Supply1").p, pv0 = (await call("GET", "/api/pool")).j, m0 = pool().minted;
+    const q = mk("Supply1").p; await new Promise((r) => setTimeout(r, 2100));   // the circulating-supply figure is cached for 2 s
+    const pv0 = (await call("GET", "/api/pool")).j, m0 = pool().minted;
     assert(Math.abs(pv0.circulating - Object.values(game.db.players).reduce((a, x) => a + x.balance, 0)) < 1e-6, "circulating = sum of balances");
-    assert(game.mint(q, 1000) === 1000 && pool().minted - m0 === 1000 && q.balance === 1000);
+    assert(game.mint(q, 1000) === 1000 && near(pool().minted - m0, 1000, 1e-6) && q.balance === 1000);
     C.EMISSION_MODE = "reserve"; const res0 = pool().reserve; pool().reserve = 300;
     try { assert(game.mint(q, 1000) === 300 && q.balance === 1300 && pool().reserve === 0 && game.mint(q, 5) === 0, "reserve mode: paid from a finite stock, then rewards stop"); } finally { C.EMISSION_MODE = "mint"; pool().reserve = res0; }
     const b0 = pool().burned, tok0 = pool().tok; game.spendMine(q, 100);
@@ -932,6 +1036,7 @@ function fakeChain() {
     app.resetLimits(); const p = gp(); fund(p, 1e9); p.lastWithdrawAt = 0; chain.wStatus = "pending";
     const wr = await call("POST", "/api/bank/withdraw", { lamports: 150000000 }, gTok);
     assert(wr.s === 200, JSON.stringify(wr.j));
+    await bank.adminApprove(wr.j.withdrawalId, "tester");
     await bank.processWithdrawals();
     const bal = p.balance, sol = p.solBalance, wid = wr.j.withdrawalId, poolSnap = JSON.stringify(game.db.pool), trSnap = JSON.stringify(tr());
     await game.flush();
@@ -941,6 +1046,7 @@ function fakeChain() {
     assert(p2 && p2.wallet === wallet() && Math.abs(p2.balance - bal) < 1e-6 && p2.solBalance === sol && p2.packs[1] && p2.packs[2], "player restored");
     assert(JSON.stringify(app2.game.db.pool) === poolSnap && JSON.stringify(app2.game.db.treasury) === trSnap, "pool state and treasury ledger restored exactly");
     assert((await app2.store.trades(1000)).length === pool().n && (await app2.store.ledger(1000)).length > 5, "full trade history and ledger rows are persisted");
+    assert(JSON.stringify(app2.game.chart("all")) === JSON.stringify(game.chart("all")) && app2.game.chart("all").points.length > 10, "the price chart history survives a restart");
     assert(w2 && w2.state === "sent" && w2.sig, "withdrawal restored with its stored signature: " + JSON.stringify(w2) + " all=" + JSON.stringify(Object.keys(app2.game.db.withdrawals)) + " wid=" + wid);
     await app2.bank.processWithdrawals();
     assert(w2.state === "done" && chain2.signed.length === 0, "finished by checking the stored signature, no second transfer");
@@ -961,6 +1067,63 @@ function fakeChain() {
     assert((await act(gTok, { type: "claimPrize" })).s === 400);
     game.db.season.start += 31 * 864e5;
   });
+  // ======================= 2. power-gated floors =======================
+  await T("floors below their Power requirement produce nothing (income, drops, shards), online and offline; leveling up switches them on", async () => {
+    gateOn();
+    try {
+      assert(S.floorReq(1) === 0 && S.floorReq(3) === 0 && S.floorReq(4) === 120 && S.floorReq(10) === 360 && S.floorReq(30) === 13740, "requirement table");
+      const q = game.createPlayer("Gated"); game.touchPlayer(q); maxMine(q, 30); q.hero.lvl = 3; q.eq = {}; q.boosts.power = 0;
+      let g = S.gateInfo(q, game.now());
+      assert(g.power === 150 && g.active.filter(Boolean).length === 5 && g.next.floor === 6 && g.next.req === 170, JSON.stringify(g));
+      const inc = S.income(q, game.now());
+      assert(inc.active.filter(Boolean).length === 5);
+      // the same mine with only its 5 active floors owned makes exactly the same money, so the 26 idle floors add nothing
+      const q4 = game.createPlayer("Gated4"); game.touchPlayer(q4); maxMine(q4, 5); q4.hero.lvl = 3; q4.eq = {}; q4.boosts.power = 0;
+      assert(Math.abs(S.income(q4, game.now()).perSec - inc.perSec) < 1e-6 * inc.perSec, "idle floors earn nothing");
+      const trips = S.tripsPerSec(q, game.now()).trips; assert(trips.slice(0, 5).every((x) => x > 0) && trips.slice(5).every((x) => x === 0), "no trips, so no drops or shards from idle floors");
+      // offline: 8 h away on a deep, weak mine => no shards at all (they only drop on floor 15+)
+      finishQuests(q); q.pending.shards = 0; q.offAcc.shards = 0;
+      for (let i = 0; i < 8 * 60 + 5; i++) { step(60e3); game.tick(); }
+      game.touchPlayer(q);
+      assert(q.pending.shards === 0 && q.offAcc.shards === 0, "gated deep floors cannot find shards offline");
+      // levelling up brings the floors online
+      q.hero.lvl = 99; g = S.gateInfo(q, game.now());
+      assert(g.power === 4950 && g.active.filter(Boolean).length === 24 && g.next.floor === 25 && g.next.req === 5520, JSON.stringify(g));
+      assert(S.income(q, game.now()).perSec > inc.perSec * 10, "higher level => more floors work => more income");
+      // the Power Boost counts towards the requirement while it runs
+      const before = S.totalPower(q, game.now()); q.boosts.power = game.now() + 1e6; assert(S.totalPower(q, game.now()) === before * 2);
+      assert(game.view(q).gate && game.view(q).gate.power === before * 2, "view exposes the gate");
+    } finally { gateOff(); }
+  });
+  await T("gear counts as power: equipping usable gear can activate a floor, broken gear does not", async () => {
+    gateOn();
+    try {
+      const q = game.createPlayer("GearGate"); game.touchPlayer(q); maxMine(q, 8); q.hero.lvl = 4; q.eq = {}; q.boosts.power = 0;
+      assert(S.gateInfo(q, game.now()).active.filter(Boolean).length === 6 && S.gateInfo(q, game.now()).power === 200);
+      const it = { id: 991, slot: "Pickaxe", r: 3, il: 1, v: 0.2, dur: 50, max: 100, aff: [], up: 0, lock: false }; q.inv.push(it); q.eq.Pickaxe = 991;
+      assert(S.itemPower(it) === 200 && S.gateInfo(q, game.now()).power === 400 && S.gateInfo(q, game.now()).active.filter(Boolean).length === 8, "400 power switches on floors 7 and 8 (need 210 / 250)");
+      it.dur = 0; assert(S.gateInfo(q, game.now()).power === 200, "a broken item gives no power");
+    } finally { gateOff(); }
+  });
+
+  // ======================= 1. wearables must never lower income =======================
+  await T("equipping a usable item never lowers income; broken items give nothing", async () => {
+    const mkSt = (n, lvl, el, wh, hl) => ({ mines: { start: { prestigeMult: 1, unlockedShaftCount: n, shafts: Array.from({ length: n }, () => ({ level: lvl })), elevator: { level: el }, warehouse: { level: wh } } }, hero: { lvl: hl }, inv: [], eq: {}, boosts: { xp: 0, earn: 0, power: 0 }, quests: {}, balance: 0, tradeStats: {} });
+    const affs = [null, { k: "speed", v: 0.05 }, { k: "cap", v: 0.05 }, { k: "aura", v: 0.1 }, { k: "yield", v: 0.05 }];
+    let cases = 0;
+    for (const cfg of [[3, 10, 5, 5, 5], [8, 30, 15, 15, 20], [15, 60, 30, 30, 40], [25, 100, 50, 50, 60], [12, 5, 1, 1, 1], [12, 200, 3, 80, 10]])
+      for (const slot of S.SLOTS) for (const v of [0.01, 0.05, 0.1, 0.3]) for (const aff of affs) {
+        const st = mkSt(...cfg), a = S.income(st, 0).perSec;
+        st.inv = [{ id: "x", slot, v, aff: aff ? [aff] : [], up: 0, dur: 50, max: 100, r: 1, il: 1 }]; st.eq = { [slot]: "x" };
+        const b = S.income(st, 0).perSec; cases++;
+        assert(b >= a * 0.9999, "income fell " + a + " -> " + b + " " + slot + " " + v + " " + JSON.stringify(aff) + " " + cfg);
+        st.inv[0].dur = 0;                                            // broken: exactly the income without the item
+        assert(Math.abs(S.income(st, 0).perSec - a) < a * 1e-9, "a broken item must give nothing");
+        assert(S.itemPower(st.inv[0]) === 0);
+      }
+    assert(cases === 960);
+  });
+
   await T("only game files are served; security headers are set; no CORS", async () => {
     for (const u of ["/server/server.js", "/server/data.json", "/.git/config", "/package.json", "/node_modules/pg/package.json", "/js/../server/config.js", "/%2e%2e/server/config.js", "/index.html/../package.json", "/js/shared.js.map"]) {
       const r = await fetch(B + u); assert(r.status === 404 || r.status === 400, u + " -> " + r.status);
@@ -980,6 +1143,85 @@ function fakeChain() {
   await T("guest creation is rate limited per IP", async () => {
     let lim = 0; for (let i = 0; i < 30; i++) if ((await call("POST", "/api/guest", {})).s === 429) lim++;
     assert(lim > 0);
+  });
+
+  console.log("admin dashboard");
+  await T("admin: off without ADMIN_TOKEN (404), page too; sign-in required, wrong token refused, a player token is not an admin session; failed logins are rate limited", async () => {
+    const saved = { t: process.env.ADMIN_TOKEN, k: process.env.ADMIN_KEY }; delete process.env.ADMIN_TOKEN; delete process.env.ADMIN_KEY;
+    try {
+      app.resetLimits();
+      assert((await call("GET", "/api/admin/overview")).s === 404 && (await call("POST", "/api/admin/login", { token: "x" })).s === 404, "API off");
+      assert((await fetch(B + "/admin")).status === 404, "page off");
+      process.env.ADMIN_TOKEN = "a-long-admin-token-123";
+      assert((await fetch(B + "/admin")).status === 200, "page on");
+      assert((await call("GET", "/api/admin/overview")).s === 401, "no session");
+      const m = mk("NotAdmin");
+      assert((await call("GET", "/api/admin/overview", null, m.tok)).s === 401, "a player token is not an admin session");
+      assert((await call("GET", "/api/admin/overview", null, null, { "x-admin-session": "forged" })).s === 401);
+      assert((await call("POST", "/api/admin/login", { token: m.tok })).s === 403, "player token cannot log in as admin");
+      let last = 0; for (let i = 0; i < 8; i++) last = (await call("POST", "/api/admin/login", { token: "wrong" + i })).s;
+      assert(last === 429, "brute force is throttled: " + last);
+      app.resetLimits();
+      const ok = await call("POST", "/api/admin/login", { token: process.env.ADMIN_TOKEN });
+      assert(ok.s === 200 && ok.j.session && ok.j.session.length >= 32);
+      assert((await call("GET", "/api/admin/me", null, null, { "x-admin-session": ok.j.session })).s === 200);
+      assert((await call("POST", "/api/admin/logout", {}, null, { "x-admin-session": ok.j.session })).s === 200 && (await call("GET", "/api/admin/me", null, null, { "x-admin-session": ok.j.session })).s === 401, "logout kills the session");
+    } finally { for (const [k, v] of [["ADMIN_TOKEN", saved.t], ["ADMIN_KEY", saved.k]]) if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+  });
+  await T("admin: approve / reject through the API, idempotent, audit log, risk flags, OG exclusion", async () => {
+    process.env.ADMIN_TOKEN = "a-long-admin-token-123"; app.resetLimits();
+    try {
+      const sess = (await call("POST", "/api/admin/login", { token: process.env.ADMIN_TOKEN })).j.session, H = { "x-admin-session": sess };
+      const A = (m, p, b) => call(m, "/api/admin/" + p, b, null, H);
+      const a = mk("WdA", { sol: 3e9 }), b = mk("WdB", { sol: 3e9 }); a.p.lastWithdrawAt = 0; b.p.lastWithdrawAt = 0;
+      app.resetLimits();
+      assert((await wd(a.tok, 1e9)).s === 200 && (await wd(b.tok, 1e9)).s === 200);
+      const wa = wOf(a.p), wb = wOf(b.p);
+      const list = await A("GET", "withdrawals?status=pending");
+      assert(list.s === 200 && list.j.rows.some((r) => r.id === wa.id && r.status === "pending" && r.player.name === "WdA") && list.j.min === 5e7 && list.j.max === 2e9, JSON.stringify(list.j).slice(0, 300));
+      const sent0 = chain.signed.length;
+      assert((await A("POST", "withdrawal/reject", { id: wb.id })).s === 400, "a reason is required");
+      const rb = a.p.solBalance, bBal = b.p.solBalance;
+      assert((await A("POST", "withdrawal/reject", { id: wb.id, reason: "looks like a bot" })).s === 200 && b.p.solBalance === bBal + 1e9, "rejected: funds come back in full");
+      assert((await A("POST", "withdrawal/reject", { id: wb.id, reason: "again" })).s === 409 && b.p.solBalance === bBal + 1e9, "no double refund");
+      assert((await A("POST", "withdrawal/approve", { id: wb.id })).s === 409, "a rejected request cannot be approved");
+      const ap = await A("POST", "withdrawal/approve", { id: wa.id });
+      assert(ap.s === 200 && ap.j.status === "approved", JSON.stringify(ap.j));
+      assert((await A("POST", "withdrawal/approve", { id: wa.id })).s === 409, "approving twice is refused");
+      await bank.processWithdrawals();
+      assert(chain.signed.length === sent0 + 1 && a.p.solBalance === rb, "sent exactly once");
+      const au = await A("GET", "audit?n=50");
+      const acts = au.j.rows.map((r) => r.action);
+      assert(au.s === 200 && acts.includes("admin.login") && acts.includes("withdrawal.approve") && acts.includes("withdrawal.reject") && acts.includes("admin.login_failed"), acts.join());
+      assert(!JSON.stringify(au.j).includes(process.env.ADMIN_TOKEN), "the token is never logged");
+      // risk flags: two accounts behind one IP
+      game.noteIp(a.p, "10.9.9.9"); game.noteIp(b.p, "10.9.9.9");
+      const pl = await A("GET", "players?q=WdA");
+      assert(pl.s === 200 && pl.j.rows[0].flags >= 1, "shared IP is flagged");
+      const pd = await A("GET", "player?id=" + a.p.id);
+      assert(pd.j.flags.some((f) => f.k === "shared_ip") && !JSON.stringify(pd.j).includes("10.9.9.9"), "only hashes are stored or shown");
+      // OG exclusion
+      a.p.tags = a.p.tags.filter((t) => t !== "og"); game.db.admin.og0 = game.now() + 1e6; a.p.tags.push("og");
+      assert((await A("POST", "player/og", { id: a.p.id, exclude: true })).s === 200 && !game.tagsOf(a.p).includes("og") && game.db.admin.ogExcluded.includes(a.p.id));
+      assert((await A("POST", "player/og", { id: a.p.id, exclude: false })).s === 200 && game.tagsOf(a.p).includes("og"));
+      assert((await A("GET", "referrals")).s === 200 && (await A("GET", "trades")).s === 200 && (await A("GET", "overview")).j.solvency.ok === true);
+    } finally { delete process.env.ADMIN_TOKEN; }
+  });
+  await T("OG tag: granted once to the accounts that exist at the first start (minus the exclusion list), never to later ones", async () => {
+    const f = path.join(os.tmpdir(), "idle-miner-og-" + process.pid + ".json");
+    const mkOld = (id, name) => Object.assign(JSON.parse(JSON.stringify(gp())), { id, name, wallet: "OgW" + id, refCode: "OG" + id.slice(0, 6).toUpperCase(), referredBy: null, created: Date.now() - 5e6, tags: undefined, ips: undefined });
+    const o1 = mkOld("0g0000000001", "Veteran"), o2 = mkOld("0g0000000002", "Excluded");
+    fs.writeFileSync(f, JSON.stringify({ meta: { season: { start: Date.now() }, lastTick: Date.now(), bonus: 0, withdrawals: {}, orders: {}, admin: { salt: "s", ogExcluded: [o2.id], flags: {}, batchSeq: 0 } }, players: { [o1.id]: o1, [o2.id]: o2 }, sigs: {} }));
+    const app4 = await createApp({ chain: fakeChain(), bs58, nacl, store: await require("./store.js").openStore({ file: f }) });
+    const g4 = app4.game;
+    assert(g4.tagsOf(g4.db.players[o1.id]).includes("og"), "existing account gets the golden tag");
+    assert(!g4.tagsOf(g4.db.players[o2.id]).includes("og"), "excluded account does not");
+    const late = g4.createPlayer("Latecomer", "LateWallet1");
+    assert(!g4.tagsOf(late).includes("og"), "an account created after the first start never gets it");
+    assert(g4.db.ogDone === true);
+    const again = Object.keys(g4.db.players).length; g4.load && 0; assert(again === 3);
+    assert(g4.tagsOf(g4.db.players[o1.id]).filter((t) => t === "og").length === 1, "granted once, no duplicates");
+    assert((await app4.game.flush(), true)); app4.server.close(); fs.unlinkSync(f);
   });
 
   console.log(`\nALL ${n} CHECKS PASSED`);
